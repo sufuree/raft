@@ -6,7 +6,7 @@
 
 ## 1. Proposal and decision status
 
-Build a small Raft implementation whose protocol core is deterministic, whose persistence dependencies are explicit, and whose resource consumption is bounded. Retain established Raft safety rules; specialize the library architecture and integration contracts rather than inventing a new consensus algorithm.
+This RFC specifies the proposed new-core option; the final build-or-compose decision remains open under section 12. Build a small Raft implementation whose protocol core is deterministic, whose persistence dependencies are explicit, and whose resource consumption is bounded. Retain established Raft safety rules; specialize the library architecture and integration contracts rather than inventing a new consensus algorithm.
 
 The proposed design consists of:
 
@@ -29,7 +29,7 @@ Support one voter for embedded use, development, and deployments that accept a s
 
 The library owns consensus and the ordering of committed opaque commands. Consumers own command schemas, deterministic application state machines, operation deduplication, and any external effects. Application policy, credentials, and resource ownership stay outside the library. It is not a scheduler, database engine, credential broker, or public gateway.
 
-Assume crash/recovery failures, delayed or duplicated messages, network partitions, and storage failures. Peers are authenticated and trusted to follow the protocol. Byzantine behavior is outside scope. Safety must not require bounded message delay or synchronized wall clocks; progress requires an eventually communicating majority, usable storage, and sufficient execution time.
+Assume crash/recovery failures, delayed or duplicated messages, network partitions, and storage failures. Peers are authenticated and trusted to follow the protocol. Byzantine behavior is outside scope. Safety must not require bounded message delay or synchronized wall clocks; progress requires an eventually communicating majority, usable storage, and sufficient execution time. Undetected rollback of a member's previously durable state is outside this failure model: matching local identity alone cannot detect it. Detect rollback through an externally maintained storage generation or treat restoration of an older image as disaster recovery; never silently resume it as the same member incarnation.
 
 The replicated log protects the commands and state covered by its durability contract. It does not automatically replicate external files or fence external writers; applications that manage those resources must supply their own guarantees.
 
@@ -50,13 +50,13 @@ Pre-vote, quorum checks, batching, learners, snapshots, and failure testing form
 
 ## 4. Protocol
 
-Use leader-based Raft with randomized election timeouts, pre-vote, log matching, the up-to-date voting rule, and majority commitment. A leader advances commitment by counting replicated entries from its current term; commitment of preceding entries follows the Raft rule. Followers advance only through a leader-confirmed matching prefix that is locally durable. Never overwrite committed entries.
+Use leader-based Raft with randomized election timeouts, pre-vote, log matching, the up-to-date voting rule, and majority commitment. A leader advances commitment by counting replicated entries from its current term; commitment of preceding entries follows the Raft rule. Followers advance only through a leader-confirmed matching prefix that is locally durable. Never overwrite committed entries. A new leader appends a no-op entry in its current term so idle clusters can establish current-term commitment and complete read barriers.
 
 Required extensions and choices:
 
 1. **Pre-vote:** Probe election viability before increasing the persistent term. A disconnected member should not unnecessarily disrupt a healthy leader when it reconnects.
 2. **Quorum checks:** Step down after insufficient quorum contact for the configured interval. This is a liveness/leadership mechanism, not an external writer fence.
-3. **Linearizable reads:** Use a quorum-confirmed read barrier, not clock-based read leases. Establish a current-term committed entry, confirm leadership with a unique read context, and wait for completed application through the resulting safe index before reading a synchronized application view. Batch compatible read barriers.
+3. **Linearizable reads:** Use a quorum-confirmed read barrier, not clock-based read leases. Establish a current-term committed entry, confirm leadership with a unique read context, and wait for completed application through the resulting safe index before reading a synchronized application view. Capture the read index from the commit index after invocation, once a current-term entry has committed. Count only acknowledgements for a confirmation round sent after capture. A read may join a batch only before that round is sent; acknowledgements from an earlier round cannot establish its barrier.
 4. **Membership:** Use joint consensus with explicit joint and final configuration entries. Require separate old/new majorities while joint; persist and recover the transitional configuration. Serialize transitions, add peers as learners, and require authenticated durable catch-up before promotion. No direct assignment of an in-memory voter list.
 5. **Leadership transfer:** Defer until the base implementation passes recovery and membership qualification. Ordinary elections are sufficient for the first version.
 
@@ -79,7 +79,7 @@ flowchart LR
 
 The core has one mutation owner. It performs no filesystem access, networking, wall-clock reads, or goroutine creation. Timers are logical ticks; election randomness is supplied from a reproducible seed/stream and included in simulation traces. Identical initial state and ordered inputs must yield identical outputs.
 
-Proposed events include `Tick`, `Receive`, `Propose`, `ReadBarrier`, `Persisted`, `StorageFailed`, `Applied`, and snapshot-transfer completions. Proposed outputs include persistence batches, outbound messages with prerequisites, committed entries eligible for application, read results, and status changes. These names describe contracts, not a frozen Go API.
+Proposed events include `Tick`, `Receive`, `Propose`, `ReadBarrier`, `Persisted`, `StorageFailed`, `Applied`, `ApplyFailed`, and snapshot-transfer completions. Proposed outputs include persistence batches, outbound messages with prerequisites, committed entries eligible for application, read results, and status changes. These names describe contracts, not a frozen Go API.
 
 Each asynchronous output carries an epoch and monotonically increasing work ID. Completions must match outstanding work; stale, duplicate, or invalid completions cannot advance state. Payload ownership is explicit: the driver retains immutable bytes until all consumers release them, or copies them under a charged budget. Applications cannot mutate proposed bytes after admission.
 
@@ -91,7 +91,7 @@ This follows the deterministic-core approach demonstrated by [etcd Raft](https:/
 
 ### 6.1 Durable state
 
-Persist cluster/member/storage identity, format version, current term and vote, the recoverable log, a safe commit watermark, and the authoritative snapshot reference. Membership is reconstructed from the snapshot and appropriate configuration entries, including any joint transition.
+Persist cluster/member/storage identity, format version, current term and vote, the recoverable log, a safe commit watermark, and the authoritative snapshot reference. Use append-time configuration activation consistently: a member's effective configuration is the latest configuration entry in its log, committed or not, or otherwise the snapshot's configuration. Suffix replacement restores the preceding configuration. While joint, elections, pre-vote, commitment, read barriers, and quorum checks require separate majorities of both voter sets. The leader may append the final configuration only after the joint configuration commits; another membership transition waits until the final configuration commits. Recovery reconstructs these rules from the snapshot and surviving log, including uncommitted configuration entries.
 
 Term and vote form one atomic hard-state update. Commit metadata must never reference entries missing from the recoverable log/snapshot. A persisted commit watermark may lag known commitment; entries above it are not assumed committed during recovery. Before handing newly committed entries to the application, durably advance the watermark through the applicable prefix.
 
@@ -110,9 +110,9 @@ An atomic storage batch may contain hard-state changes, a conflicting-suffix rep
 | Acknowledge snapshot installation | Durably publish its metadata/data and finish restoring the matching application state. |
 | Reclaim log history | Publish a complete recoverable snapshot and retain the history required by configured catch-up policy. |
 
-The first implementation persists before sending dependent replication work. A later optimization may send eligible AppendEntries while the leader's same-batch append runs, after prerequisite hard state and earlier batches are durable. Followers still acknowledge only durable data. Initially require the leader's local copy to be durable before its own application/client completion even when follower acknowledgements form a majority. Test this optimization separately; do not infer permission to reorder all messages.
+The initial conservative delivery policy persists before sending dependent replication work and does not advance local `CommitIndex` beyond `DurableIndex`. A later optimization may send eligible AppendEntries while the leader's same-batch append runs, after prerequisite hard state and earlier batches are durable. Followers still acknowledge only durable data. Initially require the leader's local copy to be durable before its own application/client completion even when follower acknowledgements form a majority. Test this optimization separately; do not infer permission to reorder all messages.
 
-Storage errors transition the node to a terminal `Failed` state for that runtime instance. Stop proposal admission, voting, success acknowledgements, and newly released application work. Report pending outcomes conservatively. Already transmitted messages and already dispatched external effects cannot be retracted. Recovery requires reopening and validating the store; it is not an automatic empty-state restart.
+Storage errors and local FSM execution failures transition the node to a terminal `Failed` state for that runtime instance; deterministic domain rejection remains an application result. Stop proposal admission, voting, success acknowledgements, and newly released application work. Relinquish leadership, stop sending AppendEntries, heartbeats, and snapshots, and fail pending read barriers. Late completions cannot release further successful responses. Report pending outcomes conservatively. Already transmitted messages and already dispatched external effects cannot be retracted. Recovery requires reopening and validating the store; it is not an automatic empty-state restart.
 
 ### 6.3 Reference storage adapter
 
@@ -128,11 +128,11 @@ The WAL format, exact synchronization primitives, and on-disk upgrade mechanism 
 
 ### 6.4 Snapshots
 
-Capture an application view at an exact completed index and term. Include effective membership, schema/version information, and application-owned deduplication/ownership state. Require an immutable or consistently isolated view; copying the whole FSM is not the default memory strategy.
+Capture an application view at an exact completed index and term. Include membership as of the snapshot index (including a joint configuration when applicable), schema/version information, and application-owned deduplication/ownership state. Require an immutable or consistently isolated view; copying the whole FSM is not the default memory strategy.
 
 Stream snapshots in bounded chunks to staging files with end-to-end integrity checks. Persist and validate the complete snapshot before publishing its authoritative manifest. Then reclaim eligible log segments. Installation must serialize against conflicting FSM application and log changes. Restore failure leaves the node unavailable rather than serving partially restored state.
 
-Snapshot transfer is authenticated, size-limited, and cancellable. Interrupted staging files are never treated as completed snapshots. Resumable transfers are optional later work; the first version may restart a bounded streaming transfer. Snapshot retention cannot exhaust disk indefinitely: stop new writes safely when the storage budget cannot support required recovery assets.
+Snapshot transfer is authenticated, size-limited, and cancellable. Interrupted staging files are never treated as completed snapshots. Resumable transfers are optional later work; the first version may restart a bounded streaming transfer. Snapshot retention cannot exhaust disk indefinitely. Budget preflight rejects new proposals before exhaustion and reserves space for hard-state updates and snapshot-based reclamation. Any failed durable write or synchronization, including ENOSPC, is terminal `Failed`; a follower that cannot persist an append must not acknowledge it.
 
 ## 7. Application and read API
 
@@ -140,10 +140,11 @@ Expose these separate watermarks:
 
 - `DurableIndex`: the locally recoverable log prefix, accounting for a published snapshot.
 - `CommitIndex`: the prefix known committed by Raft.
+- `PersistedCommitIndex`: the committed prefix whose watermark and supporting log/snapshot are locally durable.
 - `DispatchedIndex`: the prefix handed to the FSM worker.
 - `AppliedIndex`: the prefix whose ordered FSM execution has completed.
 
-Within a running incarnation, `AppliedIndex <= DispatchedIndex <= CommitIndex <= DurableIndex` under the conservative delivery policy above. Uncommitted suffix replacement may reduce `DurableIndex`; published snapshots define a floor. Do not treat index values alone as identity across disaster recovery.
+Within a running incarnation, every policy requires `AppliedIndex <= DispatchedIndex <= PersistedCommitIndex <= CommitIndex` and `PersistedCommitIndex <= DurableIndex`. The initial conservative delivery policy in section 6.2 additionally requires `CommitIndex <= DurableIndex`. The later overlap optimization may relax only that last relation; it cannot release application work ahead of local durability. Uncommitted suffix replacement may reduce `DurableIndex`; published snapshots define a floor. Do not treat index values alone as identity across disaster recovery.
 
 Provide `WaitApplied(index)` and a linearizable read operation that combines a safe read barrier with completed application. A bare leadership flag or locally observed commit index is insufficient. Application reads must use a synchronized view at or beyond the barrier index. Follower/stale reads, if added, use a separately named API with explicit consistency semantics.
 
@@ -163,11 +164,11 @@ FSM application is deterministic and ordered. Domain rejection is an application
 
 ## 8. Resource and transport contracts
 
-Require finite configurable limits for command bytes, pending proposal count/bytes, uncommitted log growth, append batch bytes/count, per-peer in-flight bytes/messages, decode allocation, snapshot chunks/concurrency, and read waiters. Charge admitted payloads until their references are released. Size and rate limits must apply before attacker-controlled allocation.
+Require finite configurable limits for command bytes, pending proposal count/bytes, uncommitted log growth, append batch bytes/count, per-peer in-flight bytes/messages, decode allocation, snapshot chunks/concurrency, and read waiters. Charge admitted payloads until their references are released. Size and rate limits must apply before attacker-controlled allocation. Validate compatible cluster-wide limits: the maximum encoded command plus framing must fit an append batch, and the maximum encoded batch must fit every participating peer's decode limit. Reject incompatible limits at join/configuration time. A snapshot that exceeds a receiver's advertised limit produces a typed catch-up failure, not an unbounded allocation.
 
-Admission returns a typed overload result or waits within the caller's deadline. A lagging follower cannot retain unlimited memory or prevent the healthy majority from progressing. Snapshot catch-up and log retention interact through an explicit policy; neither permits unsafe deletion of committed recovery state. If required storage cannot fit, reject mutations and surface the condition.
+Admission returns a typed overload result or waits within the caller's deadline. A lagging follower cannot retain unlimited memory or prevent the healthy majority from progressing. Snapshot catch-up and log retention interact through an explicit policy; neither permits unsafe deletion of committed recovery state. If storage preflight cannot reserve the required recovery space, reject new proposals and surface the condition. Actual persistence failure follows the terminal failure rule in section 6.2; admission limits cannot substitute for follower persistence.
 
-Transport uses authenticated member identities bound to cluster identity, bounded framed messages, explicit wire versions, and peer authorization. Authentication does not itself grant voting membership. Reject incompatible formats before protocol participation; address reuse must not imply member identity reuse. Trust/key configuration stays outside the core, and credentials must not enter logs or traces.
+Transport uses authenticated member identities bound to cluster identity, bounded framed messages, explicit wire versions, and peer authorization. Admission authorization is distinct from a node's current log configuration: support explicitly admitted learners and configuration-transition peers even when the receiver's local membership view lags. Process their authenticated messages under the protocol's term and membership rules; do not filter all traffic solely by the receiver's current voter list. Authentication does not itself grant voting membership. Reject incompatible formats before protocol participation; address reuse must not imply member identity reuse. Trust/key configuration stays outside the core, and credentials must not enter logs or traces.
 
 Expose queue bytes, durable/commit/applied lag, fsync latency, per-peer progress, election reasons, snapshot progress, storage errors, and overload counts. Metrics cardinality is bounded. Debug traces omit command payloads by default and can be replayed with synthetic or appropriately protected data.
 
@@ -175,7 +176,7 @@ Numeric defaults remain open until measured across representative command sizes,
 
 ## 9. Bootstrap, membership, and operational recovery
 
-Separate explicit creation, ordinary restart, peer join, and disaster recovery APIs. Creation requires provisioned cluster/member identities, authenticated peer trust, and an explicitly initialized storage identity. Restart requires existing matching state. A missing mount, empty directory, lock failure, or mismatched volume must not trigger bootstrap.
+Separate explicit creation, ordinary restart, peer join, and disaster recovery APIs. Creation requires provisioned cluster/member identities, authenticated peer trust, and an explicitly initialized storage identity. Initial cluster creation generates and persists a unique cluster incarnation, which joining members adopt and peers validate on every protocol exchange. Independent creations must not reuse an incarnation even if given the same logical cluster name; provision the designated incarnation through authenticated join/configuration. Restart requires existing matching state. A missing mount, empty directory, lock failure, or mismatched volume must not trigger bootstrap.
 
 Bind the manifest to an expected externally supplied storage identity; a manifest copied with the wrong volume is not sufficient proof of correct attachment. The runtime supplies qualified exclusive access and platform attachment checks. A local file lock alone is not a distributed ownership fence.
 
@@ -183,7 +184,7 @@ For expansion, admit authenticated learners, verify durable catch-up and resourc
 
 With quorum lost, stop new authoritative mutations. Do not force reconfiguration after an election timeout. Single-member recovery requires its durable volume or an explicitly governed backup restore. Total durable-volume loss is not covered by surviving-volume durability.
 
-Disaster recovery must fence the old cluster authority, establish a new recovery incarnation, and validate backup and storage identity. Consumers must preserve their application recovery metadata and reconcile any external effects newer than the restored state. No automatic live mixed-library migration is proposed. A later migration design must define quiescence, snapshot/schema conversion, external fencing, and rollback custody.
+Disaster recovery must fence the old cluster authority, establish a new recovery incarnation, and validate backup and storage identity. The consumer/operator must stop or isolate old members and fence any external authority before activating recovery. The library rejects peers from old cluster incarnations; a new incarnation alone cannot stop the old cluster from serving its existing clients. Consumers must preserve their application recovery metadata and reconcile any external effects newer than the restored state. Migration between libraries is out of scope.
 
 ## 10. Consumer integration contract
 
@@ -215,18 +216,19 @@ Combine protocol scenario tests, fuzzing, and deterministic simulation. Simulati
 | Gate | Required evidence |
 | --- | --- |
 | Core determinism | Identical initial state, seed, and event trace produce identical outputs; no hidden time or I/O dependencies. |
-| Persistence | Boundary-by-boundary crash tests preserve votes, committed prefixes, suffix replacement, and snapshot publication; ambiguous corruption stops recovery. |
+| Persistence | Boundary-by-boundary crash tests preserve votes, committed prefixes, suffix replacement, and snapshot publication; ambiguous corruption stops recovery. Failed writes/syncs, including disk-full, stop protocol output and successful read/application completion. |
+| Progress | With a communicating majority, usable storage, and recorded bounds on delivery and scheduling, elect a leader and commit commands within a recorded simulated bound. A reconnecting isolated member does not depose a healthy leader; a leader without quorum steps down; a lagging or failed minority does not stop majority commit. |
 | Membership | Crashes and partitions during learner catch-up, joint entry, final entry, and leader removal preserve quorum rules and recoverable configuration. |
-| Reads/application | Slow or failed FSM execution cannot produce premature `Applied` success or a stale linearizable read. |
+| Reads/application | Slow FSM execution cannot produce premature `Applied` success or a stale linearizable read. Local FSM failure enters `Failed` and stops leadership traffic and successful read completion. Test reads arriving after a confirmation round was sent. |
 | Client uncertainty | Lost replies/cancellation never imply rollback; a reference FSM demonstrates deduplication with retained operation IDs. |
 | Resource bounds | Burst proposals, a stalled FSM, slow peers, oversized frames, and snapshot transfer stay within recorded byte budgets and return bounded overload behavior. |
-| Bootstrap/recovery | Missing mount, stale volume, repeated creation, wrong identity, and incompatible formats never create an accidental authoritative cluster. |
+| Bootstrap/recovery | Missing mount, repeated creation, wrong identity, and incompatible formats never create an accidental authoritative cluster. Exercise externally detected rollback, explicit disaster recovery, and old-incarnation rejection; verify recovery refuses to proceed without the operator's required fencing acknowledgement. |
 | Platform support | Each claimed platform pins Go/runtime, filesystem, storage adapter, transport, and storage path and passes flush, locking, restart, and resource tests. |
 | Consumer contract | API documentation distinguishes consensus/application completion from external execution; examples do not imply that leadership fences external resources. |
 
 ### Benchmark design
 
-Pin both implementations, storage settings, Go version, hardware/guest, filesystem, payload distribution, and durability semantics. Compare one voter and three voters, steady and bursty command loads, healthy and lagging followers, and snapshot/recovery workloads. Add larger configurations before making scaling claims about them. Use the same application commands and comparable acknowledged-durability guarantees.
+Each comparative report names and pins every implementation and composition it measures, including the baseline. Use a pinned etcd-based composition from section 12 as the initial comparative baseline. Record storage settings, Go version, hardware/guest, filesystem, payload distribution, and durability semantics. Compare one voter and three voters, steady and bursty command loads, healthy and lagging followers, and snapshot/recovery workloads. Add larger configurations before making scaling claims about them. Use the same application commands and comparable acknowledged-durability guarantees.
 
 Measure resident/peak memory including mappings and kernel cache where observable, allocations, idle CPU, disk bytes/syncs, commit/application p50/p95/p99 latency, sustained throughput, restart time, catch-up time, and overload behavior. Report library overhead separately from the host application and its state-machine footprint.
 
@@ -242,9 +244,9 @@ No numerical win is asserted here. Define supported workload profiles and their 
 | Change the consensus algorithm | No workload evidence currently justifies doing so. |
 | Require an mmap-backed database | Unnecessary coupling of protocol to storage. Compare adapters under the same durability contract instead. |
 
-Open choices before implementation acceptance: exact Go/module API, WAL/manifest specification, format upgrades, transport encoding, initial supported platforms, numerical budgets, reference adapters for persistent and reconstructed FSMs, and whether a new core offers enough benefit over an etcd-based composition to warrant ownership. Platform-specific targets such as unikernels are optional qualification work, not a prerequisite for the general-purpose library.
+Open choices before implementation acceptance: exact Go/module API, WAL/manifest specification, format upgrades, transport encoding, initial supported platforms, numerical budgets, reference adapters for persistent and reconstructed FSMs, and whether a new core offers enough benefit over an etcd-based composition to warrant ownership. Selecting a core with apply-time membership activation requires adopting its complete companion rules and amending section 6.1; do not combine those rules with this proposal's append-time scheme. Platform-specific targets such as unikernels are optional qualification work, not a prerequisite for the general-purpose library.
 
-A useful first experiment is the deterministic driver and conformance harness around a pinned existing core, plus a bounded one-voter journal on the intended platform. That experiment can invalidate the need for a new core. Three-voter recovery and membership remain library qualification gates; external-effect qualification belongs to consumers that perform such effects.
+A useful first experiment is the deterministic driver and conformance harness around a pinned existing core, plus a bounded one-voter journal on a selected qualification platform. That experiment can invalidate the need for a new core. Three-voter recovery and membership remain library qualification gates; external-effect qualification belongs to consumers that perform such effects.
 
 ## 13. Sources and evidence status
 
