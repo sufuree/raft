@@ -386,3 +386,135 @@ func TestSingleNodeReadBarrier(t *testing.T) {
 		t.Fatalf("read index %d too low", idx)
 	}
 }
+
+// plainStore hides Preflight so writes proceed to an actual ENOSPC, testing
+// the terminal failure path rather than admission rejection.
+type plainStore struct{ s raft.Storage }
+
+func (p plainStore) Load() (raft.InitState, error)  { return p.s.Load() }
+func (p plainStore) Save(b raft.PersistBatch) error { return p.s.Save(b) }
+func (p plainStore) ReadEntries(lo, hi raft.Index) ([]raft.Entry, error) {
+	return p.s.ReadEntries(lo, hi)
+}
+func (p plainStore) ReadSnapshot() (raft.SnapshotMeta, error) { return p.s.ReadSnapshot() }
+func (p plainStore) MarkApplied(i raft.Index) error           { return p.s.MarkApplied(i) }
+func (p plainStore) Close() error                             { return p.s.Close() }
+
+// TestDiskFullIsTerminal: a failed durable write (ENOSPC) enters terminal
+// Failed and stops success output (§6.2, §11 persistence gate).
+func TestDiskFullIsTerminal(t *testing.T) {
+	backing := wal.NewMemDevice()
+	backing.WriteAt(make([]byte, 128<<10), 0)
+	backing.Sync()
+	dev, err := wal.NewFixedRegion(backing, 128<<10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := wal.Open(dev, wal.Options{
+		ClusterID: 1, MemberID: 1, Generation: 1,
+		SegmentSize: 16 << 10, MaxBatchBytes: 8 << 10, MaxDeviceBytes: 128 << 10,
+		InitialConfig: raft.Configuration{Voters: raft.NodeSet{1}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := New(Config{ID: 1, ElectionTick: 5, HeartbeatTick: 1, TickInterval: time.Millisecond},
+		plainStore{store}, newTestFSM(), NewLoopNetwork().NewTransport(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Start()
+	defer d.Stop()
+	deadline := time.Now().Add(5 * time.Second)
+	for !d.IsLeader() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	payload := bytes.Repeat([]byte("x"), 4<<10)
+	failed := false
+	for i := 0; i < 200; i++ {
+		_, err := d.Propose(ctx, payload)
+		if err != nil {
+			// ErrOutcomeUnknown is the conservative report for proposals
+			// admitted when the node failed (§6.2).
+			if errors.Is(err, ErrFailed) || errors.Is(err, ErrOverload) || errors.Is(err, ErrOutcomeUnknown) {
+				failed = true
+				break
+			}
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if d.Role() == raft.Failed {
+			failed = true
+			break
+		}
+	}
+	if !failed {
+		t.Fatal("disk never filled")
+	}
+	// Allow the failure event to propagate.
+	deadline = time.Now().Add(2 * time.Second)
+	for d.Role() != raft.Failed && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if d.Role() != raft.Failed {
+		t.Fatalf("expected terminal Failed, got %v", d.Role())
+	}
+	if _, err := d.Propose(ctx, []byte("after")); !errors.Is(err, ErrFailed) {
+		t.Fatalf("admission after failure: %v", err)
+	}
+	if _, err := d.Read(ctx); !errors.Is(err, ErrFailed) {
+		t.Fatalf("read after failure: %v", err)
+	}
+}
+
+// TestPreflightRejectsAdmission: with the WAL's Preflight visible, admission
+// is rejected with typed overload before exhaustion, preserving the recovery
+// reserve (§8).
+func TestPreflightRejectsAdmission(t *testing.T) {
+	backing := wal.NewMemDevice()
+	backing.WriteAt(make([]byte, 128<<10), 0)
+	backing.Sync()
+	dev, _ := wal.NewFixedRegion(backing, 128<<10)
+	store, err := wal.Open(dev, wal.Options{
+		ClusterID: 1, MemberID: 1, Generation: 1,
+		SegmentSize: 16 << 10, MaxBatchBytes: 8 << 10, MaxDeviceBytes: 128 << 10,
+		InitialConfig: raft.Configuration{Voters: raft.NodeSet{1}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := New(Config{ID: 1, ElectionTick: 5, HeartbeatTick: 1, TickInterval: time.Millisecond},
+		store, newTestFSM(), NewLoopNetwork().NewTransport(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Start()
+	defer d.Stop()
+	deadline := time.Now().Add(5 * time.Second)
+	for !d.IsLeader() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	// Fill the device directly until the reserve is exhausted.
+	for i := 1; ; i++ {
+		c := raft.Index(i)
+		err := store.Save(raft.PersistBatch{
+			Entries: []raft.Entry{{Term: 1, Index: raft.Index(i), Data: make([]byte, 4<<10)}},
+			Commit:  &c,
+		})
+		if err != nil {
+			break
+		}
+		if store.Preflight(4<<10) != nil {
+			break
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := d.Propose(ctx, make([]byte, 4<<10)); !errors.Is(err, ErrOverload) {
+		t.Fatalf("want ErrOverload from preflight, got %v", err)
+	}
+	if d.Role() == raft.Failed {
+		t.Fatal("preflight rejection must not fail the node")
+	}
+}

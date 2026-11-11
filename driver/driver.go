@@ -464,6 +464,14 @@ func (d *Driver) Propose(ctx context.Context, data []byte) (Result, error) {
 		d.mu.Unlock()
 		return Result{}, ErrOverload
 	}
+	// Storage preflight (§8): reject admission before exhaustion while the
+	// recovery reserve is preserved. Actual write failure is terminal (§6.2).
+	if pf, ok := d.store.(interface{ Preflight(int) error }); ok {
+		if err := pf.Preflight(len(data)); err != nil {
+			d.mu.Unlock()
+			return Result{}, ErrOverload
+		}
+	}
 	d.nextID++
 	id := d.nextID
 	ch := make(chan Result, 1)

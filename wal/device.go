@@ -54,6 +54,11 @@ type MemDevice struct {
 	durable  []byte // last synced prefix
 	TornTail int    // if >0, the next WriteAt truncates its last TornTail bytes
 	FailSync bool
+	// OnSync, when set, runs after each successful Sync with the cumulative
+	// sync count; tests use it to crash at exact durability boundaries.
+	OnSync    func(n int)
+	SyncCount int
+	crashed   bool
 }
 
 // NewMemDevice creates an empty memory device.
@@ -75,6 +80,9 @@ func (d *MemDevice) ReadAt(p []byte, off int64) (int, error) {
 func (d *MemDevice) WriteAt(p []byte, off int64) (int, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.crashed {
+		return 0, errors.New("wal: device crashed")
+	}
 	end := off + int64(len(p))
 	if end > int64(len(d.data)) {
 		grown := make([]byte, end)
@@ -93,11 +101,22 @@ func (d *MemDevice) WriteAt(p []byte, off int64) (int, error) {
 
 func (d *MemDevice) Sync() error {
 	d.mu.Lock()
-	defer d.mu.Unlock()
+	if d.crashed {
+		d.mu.Unlock()
+		return errors.New("wal: device crashed")
+	}
 	if d.FailSync {
+		d.mu.Unlock()
 		return errors.New("wal: injected sync failure")
 	}
 	d.durable = append([]byte(nil), d.data...)
+	d.SyncCount++
+	n := d.SyncCount
+	hook := d.OnSync
+	d.mu.Unlock()
+	if hook != nil {
+		hook(n)
+	}
 	return nil
 }
 
@@ -117,11 +136,71 @@ func (d *MemDevice) Truncate(size int64) error {
 }
 
 // Crash reverts the device to its last synchronized prefix, dropping any
-// unsynchronized writes (the crash/recovery model, §11).
+// unsynchronized writes (the crash/recovery model, §11). Further writes fail
+// until PowerOn, modelling a powered-off device.
 func (d *MemDevice) Crash() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.data = append([]byte(nil), d.durable...)
+	d.crashed = true
+}
+
+// PowerOn restores write access after a simulated crash.
+func (d *MemDevice) PowerOn() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.crashed = false
 }
 
 var errEOF = errors.New("wal: EOF")
+
+// FixedRegionDevice binds the WAL to a fixed-size region with raw block-device
+// semantics (§6.3): the size never changes, Truncate is a no-op (a block
+// device cannot shrink; logical disposal is encoded in the recovery
+// protocol), and writes past the region fail with ENOSPC. It wraps any
+// Device, including a real block device or a fixed-size file.
+type FixedRegionDevice struct {
+	dev  Device
+	size int64
+}
+
+// NewFixedRegion wraps dev with a fixed region of the given size. The size
+// must not exceed the underlying device's size.
+func NewFixedRegion(dev Device, size int64) (*FixedRegionDevice, error) {
+	sz, err := dev.Size()
+	if err != nil {
+		return nil, err
+	}
+	if size <= 0 || size > sz {
+		return nil, errors.New("wal: fixed region exceeds device size")
+	}
+	return &FixedRegionDevice{dev: dev, size: size}, nil
+}
+
+func (d *FixedRegionDevice) ReadAt(p []byte, off int64) (int, error) {
+	if off >= d.size {
+		return 0, errEOF
+	}
+	if off+int64(len(p)) > d.size {
+		p = p[:d.size-off]
+	}
+	return d.dev.ReadAt(p, off)
+}
+
+func (d *FixedRegionDevice) WriteAt(p []byte, off int64) (int, error) {
+	if off+int64(len(p)) > d.size {
+		return 0, errENOSPC
+	}
+	return d.dev.WriteAt(p, off)
+}
+
+func (d *FixedRegionDevice) Sync() error { return d.dev.Sync() }
+
+// Size returns the constant region size; a block device never grows.
+func (d *FixedRegionDevice) Size() (int64, error) { return d.size, nil }
+
+// Truncate is a no-op: disposal of dead space is logical, encoded in the
+// checkpoint and the stale-tail recovery rule, never a device resize.
+func (d *FixedRegionDevice) Truncate(size int64) error { return nil }
+
+var errENOSPC = errors.New("wal: no space left on device")

@@ -46,6 +46,13 @@ func encodeBatch(batch raft.PersistBatch) []byte {
 		b = append(b, cfg...)
 		b = putU32(b, uint32(len(batch.Snapshot.Data)))
 		b = append(b, batch.Snapshot.Data...)
+		if batch.SnapshotStream != nil {
+			b = append(b, 1)
+			b = putU64(b, batch.SnapshotStream.Size)
+			b = putU32(b, batch.SnapshotStream.CRC)
+		} else {
+			b = append(b, 0)
+		}
 	} else {
 		b = append(b, 0)
 	}
@@ -144,6 +151,11 @@ func decodeBatch(payload []byte) (raft.PersistBatch, error) {
 		snap.Config = cfg
 		dl := r.u32()
 		snap.Data = append([]byte(nil), r.bytes(dl)...)
+		// v2 trailer: streamed-data reference. v1 payloads end here.
+		if r.err == nil && len(r.b) > 0 && r.byte() == 1 {
+			ref := raft.SnapshotStreamRef{Size: r.u64(), CRC: r.u32()}
+			batch.SnapshotStream = &ref
+		}
 		batch.Snapshot = &snap
 	}
 	if r.err != nil {

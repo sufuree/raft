@@ -18,13 +18,24 @@ import (
 const (
 	superMagic    = 0x5257414c // "RWAL"
 	recordMagic   = 0x52424154 // "RBAT"
-	formatVersion = 1
-	superSize     = 4096
-	headerSize    = 17 // magic(4)+len(4)+seq(8)+type(1)
-	crcSize       = 4
+	formatVersion = 2
+	// formatVersionV1 devices are read and upgraded in place (§6.3).
+	formatVersionV1 = 1
+	superSize       = 4096
+	headerSize      = 17 // magic(4)+len(4)+seq(8)+type(1)
+	crcSize         = 4
 
-	typeBatch   = 1
-	typeApplied = 2
+	typeBatch    = 1
+	typeApplied  = 2
+	typeSnapData = 3 // streamed snapshot chunk (§6.4)
+
+	// Checkpoint slots live in the superblock's reserved space. Two slots
+	// with CRC and monotonic sequence make the checkpoint flip atomic: a torn
+	// slot write falls back to the previous valid slot.
+	slotAOff  = 512
+	slotBOff  = 768
+	slotSize  = 28         // magic(4)+seq(8)+checkpoint(8)+crc(4)
+	slotMagic = 0x52434b50 // "RCKP"
 )
 
 // ErrCorrupt reports corruption that requires recovery intervention (§6.3).
@@ -38,6 +49,13 @@ type Options struct {
 	MemberID      uint64
 	Generation    uint64
 	InitialConfig raft.Configuration
+	// MaxSnapshotBytes bounds a reassembled streamed snapshot (§6.4, §8).
+	MaxSnapshotBytes int
+	// MaxDeviceBytes caps total device growth for growable substrates; zero
+	// means the substrate's own size governs (fixed for raw block devices).
+	MaxDeviceBytes int64
+	// MinReclaimBytes is the dead-prefix threshold before compaction runs.
+	MinReclaimBytes int64
 }
 
 func (o *Options) setDefaults() {
@@ -49,6 +67,12 @@ func (o *Options) setDefaults() {
 	}
 	if o.SegmentSize < superSize {
 		o.SegmentSize = superSize
+	}
+	if o.MaxSnapshotBytes <= 0 {
+		o.MaxSnapshotBytes = 64 << 20
+	}
+	if o.MinReclaimBytes <= 0 {
+		o.MinReclaimBytes = 1 << 20
 	}
 }
 
@@ -63,9 +87,16 @@ type WAL struct {
 	ents    []raft.Entry
 	applied raft.Index
 
-	writeOff int64
-	seq      uint64
-	closed   bool
+	writeOff   int64
+	checkpoint int64
+	seq        uint64
+	slotSeq    uint64
+	slotFlip   bool
+	closed     bool
+
+	// snapStage holds streamed snapshot chunks for the snapshot currently
+	// being published; a manifest references them (§6.4).
+	snapStage map[raft.Index][]byte
 }
 
 // Open recovers or initializes a WAL on dev. A fresh device is initialized only
@@ -105,8 +136,9 @@ func (w *WAL) recover() error {
 	if binary.BigEndian.Uint32(sb[0:4]) != superMagic {
 		return fmt.Errorf("%w: bad superblock magic", ErrCorrupt)
 	}
-	if binary.BigEndian.Uint32(sb[4:8]) != formatVersion {
-		return fmt.Errorf("%w: unsupported version", ErrCorrupt)
+	ver := binary.BigEndian.Uint32(sb[4:8])
+	if ver != formatVersion && ver != formatVersionV1 {
+		return fmt.Errorf("%w: unsupported version %d", ErrCorrupt, ver)
 	}
 	cluster := binary.BigEndian.Uint64(sb[8:16])
 	member := binary.BigEndian.Uint64(sb[16:24])
@@ -133,8 +165,22 @@ func (w *WAL) recover() error {
 	w.opts.MemberID = member
 	w.opts.Generation = gen
 
-	// Scan records.
-	off := int64(superSize)
+	// Recovery starts at the published checkpoint; earlier records are dead
+	// space reclaimed by compaction (§6.3).
+	cp, slotSeq, slotB, err := readCheckpoint(sb, size)
+	if err != nil {
+		return err
+	}
+	w.checkpoint = cp
+	w.slotSeq = slotSeq
+	// Alternate slots so a flip never overwrites the newest valid checkpoint.
+	w.slotFlip = !slotB
+
+	// Scan records. writeOff tracks the end of the last valid record; the
+	// scan cursor may skip zero padding beyond it (fixed regions are always
+	// zero-padded to their constant size).
+	off := cp
+	lastEnd := cp
 	lastSeq := uint64(0)
 	for off < size {
 		// Skip zero padding to the next segment boundary.
@@ -151,25 +197,32 @@ func (w *WAL) recover() error {
 		}
 		rec, n, err := w.readRecord(off, size)
 		if err != nil {
-			// Torn final record: disposable only if nothing valid follows.
-			if off+int64(n) < size && w.hasValidRecordAfter(off+int64(n), size) {
+			// Torn final record: disposable only if nothing live follows.
+			if off+int64(n) < size && w.hasValidRecordAfter(off+int64(n), size, lastSeq) {
 				return fmt.Errorf("%w: torn record followed by valid data", ErrCorrupt)
 			}
 			break
 		}
 		if rec.seq <= lastSeq && lastSeq != 0 {
-			return fmt.Errorf("%w: non-monotonic sequence", ErrCorrupt)
+			// Stale tail: a compaction copied the live region forward, leaving
+			// older records behind. A valid CRC covers the sequence, so a
+			// regression under valid checksums marks dead space, not corruption.
+			break
 		}
 		lastSeq = rec.seq
 		if err := w.applyRecord(rec); err != nil {
 			return err
 		}
 		off += int64(n)
+		lastEnd = off
 	}
-	w.writeOff = off
+	w.writeOff = lastEnd
 	w.seq = lastSeq
-	// Dispose of any torn tail.
-	if err := w.dev.Truncate(off); err != nil {
+	// Interrupted snapshot staging never becomes a snapshot (§6.4): chunks
+	// without a manifest are orphans and are discarded.
+	w.snapStage = nil
+	// Dispose of any torn tail (no-op on fixed raw-block substrates).
+	if err := w.dev.Truncate(lastEnd); err != nil {
 		return err
 	}
 	if err := w.dev.Sync(); err != nil {
@@ -179,6 +232,17 @@ func (w *WAL) recover() error {
 	if w.hs.Commit > w.lastIndex() {
 		return fmt.Errorf("%w: commit %d beyond recoverable log %d", ErrCorrupt, w.hs.Commit, w.lastIndex())
 	}
+	// On-disk upgrade (§6.3): a v1 superblock is rewritten as v2 after a
+	// successful recovery. A crash before this point re-runs v1 recovery.
+	if ver == formatVersionV1 {
+		binary.BigEndian.PutUint32(sb[4:8], formatVersion)
+		if _, err := w.dev.WriteAt(sb, 0); err != nil {
+			return err
+		}
+		if err := w.dev.Sync(); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -187,7 +251,7 @@ func (w *WAL) nextSegment(off int64) int64 {
 	return superSize + (rel/w.opts.SegmentSize+1)*w.opts.SegmentSize
 }
 
-func (w *WAL) hasValidRecordAfter(off, size int64) bool {
+func (w *WAL) hasValidRecordAfter(off, size int64, lastSeq uint64) bool {
 	for off < size {
 		var magic [4]byte
 		if _, err := w.dev.ReadAt(magic[:], off); err != nil {
@@ -201,8 +265,12 @@ func (w *WAL) hasValidRecordAfter(off, size int64) bool {
 		if m != recordMagic {
 			return false
 		}
-		_, _, err := w.readRecord(off, size)
-		return err == nil
+		rec, _, err := w.readRecord(off, size)
+		if err != nil {
+			return false
+		}
+		// Stale-tail records are dead space, not live data.
+		return rec.seq > lastSeq || lastSeq == 0
 	}
 	return false
 }
@@ -250,7 +318,7 @@ func (w *WAL) applyRecord(r record) error {
 		if err != nil {
 			return fmt.Errorf("%w: %v", ErrCorrupt, err)
 		}
-		w.applyBatch(b)
+		return w.applyBatch(b)
 	case typeApplied:
 		if len(r.payload) < 8 {
 			return fmt.Errorf("%w: short applied record", ErrCorrupt)
@@ -259,17 +327,38 @@ func (w *WAL) applyRecord(r record) error {
 		if idx > w.applied {
 			w.applied = idx
 		}
+	case typeSnapData:
+		return w.stageSnapChunk(r.payload)
 	default:
 		return fmt.Errorf("%w: unknown record type %d", ErrCorrupt, r.typ)
 	}
 	return nil
 }
 
-func (w *WAL) applyBatch(b raft.PersistBatch) {
+func (w *WAL) applyBatch(b raft.PersistBatch) error {
 	if b.Snapshot != nil {
 		w.snap = *b.Snapshot
 		w.snap.Config = b.Snapshot.Config.Clone()
-		w.ents = nil
+		if b.SnapshotStream != nil {
+			// The manifest references streamed chunks; they must be complete
+			// and intact, else recovery requires intervention (§6.3, §6.4).
+			data, ok := w.snapStage[b.Snapshot.Index]
+			if !ok || uint64(len(data)) != b.SnapshotStream.Size ||
+				crc32.ChecksumIEEE(data) != b.SnapshotStream.CRC {
+				return fmt.Errorf("%w: snapshot manifest references missing or corrupt data at %d", ErrCorrupt, b.Snapshot.Index)
+			}
+			w.snap.Data = data
+			delete(w.snapStage, b.Snapshot.Index)
+		}
+		// Retain the suffix above the snapshot: committed entries above the
+		// snapshot index must survive publication (§6.1, §6.4).
+		var keep []raft.Entry
+		for _, e := range w.ents {
+			if e.Index > b.Snapshot.Index {
+				keep = append(keep, e)
+			}
+		}
+		w.ents = keep
 	}
 	if b.TruncateAt > 0 {
 		var keep []raft.Entry
@@ -295,6 +384,7 @@ func (w *WAL) applyBatch(b raft.PersistBatch) {
 	if b.Commit != nil && *b.Commit > w.hs.Commit {
 		w.hs.Commit = *b.Commit
 	}
+	return nil
 }
 
 func (w *WAL) appendEntry(e raft.Entry) {
@@ -335,42 +425,136 @@ func (w *WAL) initSuperblock() error {
 	return nil
 }
 
-// Save implements raft.Storage: one atomic, synchronized batch record.
-func (w *WAL) Save(b raft.PersistBatch) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.closed {
-		return errors.New("wal: closed")
-	}
-	payload := encodeBatch(b)
+// appendRecord writes one checksummed record at the write cursor, advancing
+// it. The caller synchronizes; a successful Sync is the durable receipt.
+// Caller holds w.mu.
+func (w *WAL) appendRecord(typ byte, payload []byte) error {
 	recSize := headerSize + len(payload) + crcSize
 	if recSize > w.opts.MaxBatchBytes || int64(recSize) > w.opts.SegmentSize {
-		return fmt.Errorf("wal: batch %d bytes exceeds budget", recSize)
+		return fmt.Errorf("wal: record %d bytes exceeds budget", recSize)
 	}
 	off := w.writeOff
 	rel := off - superSize
 	if rel%w.opts.SegmentSize+int64(recSize) > w.opts.SegmentSize {
 		off = w.nextSegment(off)
 	}
+	if err := w.spaceCheck(off, recSize); err != nil {
+		return err
+	}
 	w.seq++
 	buf := make([]byte, recSize)
 	binary.BigEndian.PutUint32(buf[0:4], recordMagic)
 	binary.BigEndian.PutUint32(buf[4:8], uint32(len(payload)))
 	binary.BigEndian.PutUint64(buf[8:16], w.seq)
-	buf[16] = typeBatch
+	buf[16] = typ
 	copy(buf[headerSize:], payload)
 	crcBuf := append([]byte{}, buf[8:16]...)
-	crcBuf = append(crcBuf, typeBatch)
+	crcBuf = append(crcBuf, typ)
 	crcBuf = append(crcBuf, payload...)
 	binary.BigEndian.PutUint32(buf[headerSize+len(payload):], crc32.ChecksumIEEE(crcBuf))
 	if _, err := w.dev.WriteAt(buf, off); err != nil {
 		return err
 	}
+	w.writeOff = off + int64(recSize)
+	return nil
+}
+
+// Save implements raft.Storage: one atomic, synchronized batch record.
+// Snapshot publications are self-contained (hard state and applied watermark
+// included) so the recovery checkpoint can discard all older records (§6.1,
+// §6.3, §6.4). Large snapshots stream as chunk records before the manifest.
+func (w *WAL) Save(b raft.PersistBatch) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return errors.New("wal: closed")
+	}
+	if b.Snapshot != nil {
+		// Carry the current hard state into the publication record: older
+		// term/vote records become reclaimable once the checkpoint advances.
+		hs := w.hs
+		if b.HardState != nil {
+			if b.HardState.Term != 0 || b.HardState.Vote != 0 {
+				hs.Term, hs.Vote = b.HardState.Term, b.HardState.Vote
+			}
+			if b.HardState.Commit > hs.Commit {
+				hs.Commit = b.HardState.Commit
+			}
+		}
+		if b.Commit != nil && *b.Commit > hs.Commit {
+			hs.Commit = *b.Commit
+		}
+		b.HardState = &hs
+	}
+	manifest := b
+	if b.Snapshot != nil {
+		// The publication must be self-contained above the snapshot index:
+		// the checkpoint discards earlier records, so the suffix entries ride
+		// in the manifest batch (§6.1, §6.4).
+		var suffix []raft.Entry
+		for _, e := range w.ents {
+			if e.Index > b.Snapshot.Index {
+				suffix = append(suffix, e)
+			}
+		}
+		manifest.Entries = append(suffix, b.Entries...)
+	}
+	stream := b.Snapshot != nil && len(b.Snapshot.Data) > w.opts.MaxBatchBytes/2
+	var streamStart int64
+	if stream {
+		if len(b.Snapshot.Data) > w.opts.MaxSnapshotBytes {
+			return fmt.Errorf("%w: snapshot %d exceeds cap %d", ErrNoSpace, len(b.Snapshot.Data), w.opts.MaxSnapshotBytes)
+		}
+		var err error
+		streamStart, err = w.writeSnapChunks(b.Snapshot.Index, b.Snapshot.Data)
+		if err != nil {
+			return err
+		}
+		snapCopy := *b.Snapshot
+		snapCopy.Data = nil
+		manifest.Snapshot = &snapCopy
+		manifest.SnapshotStream = &raft.SnapshotStreamRef{
+			Size: uint64(len(b.Snapshot.Data)),
+			CRC:  crc32.ChecksumIEEE(b.Snapshot.Data),
+		}
+	}
+	payload := encodeBatch(manifest)
+	if err := w.appendRecord(typeBatch, payload); err != nil {
+		return err
+	}
 	if err := w.dev.Sync(); err != nil {
 		return err
 	}
-	w.applyBatch(b)
-	w.writeOff = off + int64(recSize)
+	manifestOff := w.writeOff - int64(headerSize+len(payload)+crcSize)
+	// The checkpoint must cover the manifest's dependencies: for streamed
+	// publications the chunks precede the manifest (§6.4).
+	checkpointOff := manifestOff
+	if stream {
+		checkpointOff = streamStart
+	}
+	if err := w.applyBatch(b); err != nil {
+		return err
+	}
+	if b.Snapshot != nil {
+		// Persist the applied watermark so the checkpointed region is
+		// self-contained for recovery (§6.1).
+		if w.applied > 0 {
+			payload := make([]byte, 8)
+			binary.BigEndian.PutUint64(payload, uint64(w.applied))
+			if err := w.appendRecord(typeApplied, payload); err != nil {
+				return err
+			}
+			if err := w.dev.Sync(); err != nil {
+				return err
+			}
+		}
+		if err := w.flipCheckpoint(checkpointOff); err != nil {
+			return err
+		}
+		if err := w.maybeCompact(); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -378,36 +562,21 @@ func (w *WAL) Save(b raft.PersistBatch) error {
 func (w *WAL) MarkApplied(idx raft.Index) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if w.closed {
+		return errors.New("wal: closed")
+	}
 	if idx <= w.applied {
 		return nil
 	}
 	payload := make([]byte, 8)
 	binary.BigEndian.PutUint64(payload, uint64(idx))
-	recSize := headerSize + len(payload) + crcSize
-	off := w.writeOff
-	rel := off - superSize
-	if rel%w.opts.SegmentSize+int64(recSize) > w.opts.SegmentSize {
-		off = w.nextSegment(off)
-	}
-	w.seq++
-	buf := make([]byte, recSize)
-	binary.BigEndian.PutUint32(buf[0:4], recordMagic)
-	binary.BigEndian.PutUint32(buf[4:8], uint32(len(payload)))
-	binary.BigEndian.PutUint64(buf[8:16], w.seq)
-	buf[16] = typeApplied
-	copy(buf[headerSize:], payload)
-	crcBuf := append([]byte{}, buf[8:16]...)
-	crcBuf = append(crcBuf, typeApplied)
-	crcBuf = append(crcBuf, payload...)
-	binary.BigEndian.PutUint32(buf[headerSize+len(payload):], crc32.ChecksumIEEE(crcBuf))
-	if _, err := w.dev.WriteAt(buf, off); err != nil {
+	if err := w.appendRecord(typeApplied, payload); err != nil {
 		return err
 	}
 	if err := w.dev.Sync(); err != nil {
 		return err
 	}
 	w.applied = idx
-	w.writeOff = off + int64(recSize)
 	return nil
 }
 

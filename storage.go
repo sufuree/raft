@@ -104,7 +104,15 @@ func (m *MemStorage) Save(b PersistBatch) error {
 	if b.Snapshot != nil {
 		m.snap = *b.Snapshot
 		m.snap.Config = b.Snapshot.Config.Clone()
-		m.ents = nil
+		// Retain the suffix above the snapshot: committed entries above the
+		// snapshot index must survive publication (§6.1, §6.4).
+		var keep []Entry
+		for _, e := range m.ents {
+			if e.Index > b.Snapshot.Index {
+				keep = append(keep, e)
+			}
+		}
+		m.ents = keep
 	}
 	if b.TruncateAt > 0 {
 		var keep []Entry

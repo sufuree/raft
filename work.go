@@ -29,6 +29,17 @@ type PersistBatch struct {
 	Commit *Index
 	// Snapshot, when set, is the authoritative publication.
 	Snapshot *SnapshotMeta
+	// SnapshotStream, when set by a storage adapter, describes snapshot data
+	// published as chunk records instead of inline Data (§6.4). The core never
+	// sets it; adapters use it for bounded streaming publication.
+	SnapshotStream *SnapshotStreamRef
+}
+
+// SnapshotStreamRef references streamed snapshot data by size and end-to-end
+// checksum (§6.4).
+type SnapshotStreamRef struct {
+	Size uint64
+	CRC  uint32
 }
 
 // Work is an asynchronous output carrying an epoch and monotonic ID (§5).

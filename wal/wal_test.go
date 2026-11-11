@@ -63,6 +63,7 @@ func TestTornFinalBatchDiscarded(t *testing.T) {
 	c2 := raft.Index(2)
 	w.Save(raft.PersistBatch{Entries: []raft.Entry{entry(2, 1, "b")}, Commit: &c2})
 	dev.Crash()
+	dev.PowerOn()
 	w2, err := Open(dev, opts)
 	if err != nil {
 		t.Fatalf("recovery after torn batch: %v", err)
@@ -81,6 +82,7 @@ func TestUnsyncedTailDisappears(t *testing.T) {
 	// Write a partial record directly without syncing, then crash.
 	dev.WriteAt([]byte{0x52, 0x42, 0x41, 0x54, 0xff, 0xff}, w.writeOff)
 	dev.Crash()
+	dev.PowerOn()
 	w2, err := Open(dev, opts)
 	if err != nil {
 		t.Fatalf("recovery: %v", err)
