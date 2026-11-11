@@ -15,6 +15,7 @@ go version
 curl -sSfL https://ops.city/get.sh | sh || exit 1
 ops version || true
 
+rm -rf /root/raft
 mkdir -p /root/raft && cd /root/raft
 aws s3 cp s3://raft-qual-1794435910-27473/raft-src.tar.gz . || exit 1
 tar xzf raft-src.tar.gz
