@@ -31,6 +31,12 @@ func confDecode(data []byte) (Configuration, error) {
 			return nil, errConf
 		}
 		data = data[r:]
+		// Decode allocation cap (§8): every ID costs at least one byte, so a
+		// count larger than the remaining payload is malformed. Validate before
+		// allocating; never trust an attacker-controlled count.
+		if n > uint64(len(data)) {
+			return nil, errConf
+		}
 		s := make(NodeSet, 0, n)
 		for i := uint64(0); i < n; i++ {
 			id, r := binary.Uvarint(data)

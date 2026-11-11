@@ -107,7 +107,17 @@ func decodeBatch(payload []byte) (raft.PersistBatch, error) {
 	}
 	batch.TruncateAt = raft.Index(r.u64())
 	n := r.u32()
+	// Decode allocation cap (§8): each entry costs at least 21 bytes on the
+	// wire (term 8 + index 8 + type 1 + data length 4). Reject an impossible
+	// count before allocating, and stop appending once the payload is short;
+	// otherwise a malformed count could drive billions of zero-entry appends.
+	if uint64(n)*21 > uint64(len(r.b)) {
+		return batch, errShort
+	}
 	for i := uint32(0); i < n; i++ {
+		if r.err != nil {
+			return batch, r.err
+		}
 		e := raft.Entry{
 			Term:  raft.Term(r.u64()),
 			Index: raft.Index(r.u64()),
