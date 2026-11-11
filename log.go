@@ -68,6 +68,21 @@ func (l *raftLog) append(es []Entry) (Index, []Entry) {
 	return trunc, rest
 }
 
+// conflictIndex returns the first index where es conflicts with the local
+// log (same index, different term), or 0 when there is no conflict. It does
+// not mutate the log, so callers can refuse a truncation before applying it.
+func (l *raftLog) conflictIndex(es []Entry) Index {
+	for _, e := range es {
+		if e.Index > l.lastIndex() {
+			break
+		}
+		if l.term(e.Index) != e.Term {
+			return e.Index
+		}
+	}
+	return 0
+}
+
 // truncateFrom discards entries with index >= i.
 func (l *raftLog) truncateFrom(i Index) {
 	if i <= l.snapshot.Index {

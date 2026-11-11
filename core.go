@@ -19,6 +19,9 @@ type Config struct {
 	CheckQuorum   bool
 	// Seed drives election randomness reproducibly (§5).
 	Seed int64
+	// MaxUncommittedBytes caps log bytes above the commit index (§8). Zero
+	// selects the default; admission beyond the cap returns OutcomeOverload.
+	MaxUncommittedBytes int
 	// Trace enables bounded protocol decision tracing for diagnostics.
 	Trace bool
 }
@@ -35,6 +38,9 @@ func (c *Config) validate() {
 		if c.HeartbeatTick < 1 {
 			c.HeartbeatTick = 1
 		}
+	}
+	if c.MaxUncommittedBytes <= 0 {
+		c.MaxUncommittedBytes = 64 << 20
 	}
 }
 
@@ -59,6 +65,10 @@ const (
 	OutcomeApplied
 	// OutcomeUnknown: admitted or cannot be ruled out; final application unknown.
 	OutcomeUnknown
+	// OutcomeOverload: rejected before admission because a resource budget
+	// is exhausted (§8). Like OutcomeRejected, this invocation was not
+	// admitted; a prior invocation with the same identity may still exist.
+	OutcomeOverload
 )
 
 // ProposalResult reports a proposal's outcome to its caller.
@@ -81,6 +91,10 @@ type Core struct {
 	leader NodeID
 
 	log *raftLog
+
+	// uncommittedBytes tracks log payload bytes above commitIndex (§8
+	// uncommitted-log growth cap). Pure accounting: no I/O, deterministic.
+	uncommittedBytes int
 
 	// Watermarks (§7).
 	durableIndex    Index
@@ -205,6 +219,11 @@ func NewCore(cfg Config, init InitState) *Core {
 	c.dispatchedIndex = init.AppliedIndex
 	c.leaderCommit = init.HardState.Commit
 	c.leaderMatch = init.Snapshot.Index
+	for _, e := range init.Entries {
+		if e.Index > c.commitIndex {
+			c.uncommittedBytes += len(e.Data)
+		}
+	}
 	c.resetElectionTimeout()
 	return c
 }
@@ -413,9 +432,7 @@ func (c *Core) onPersisted(ev Event) {
 		if pw.commit > c.persistedCommit {
 			c.persistedCommit = pw.commit
 		}
-		if pw.commit > c.commitIndex {
-			c.commitIndex = pw.commit
-		}
+		c.setCommit(pw.commit)
 	}
 	c.maybeCommit()
 	c.maybeDispatch()
@@ -446,6 +463,38 @@ func (c *Core) maybeDispatch() {
 		c.out.work(Work{ID: id, Epoch: c.epoch, Kind: WorkApply, Apply: entries})
 		c.dispatchedIndex = target
 	}
+}
+
+// appendLog appends entries and maintains the uncommitted-byte budget (§8).
+// Truncated suffix bytes are released; appended bytes are charged.
+func (c *Core) appendLog(es []Entry) (Index, []Entry) {
+	if conflict := c.log.conflictIndex(es); conflict > 0 {
+		for _, e := range c.log.entries(conflict, c.log.lastIndex()+1) {
+			c.uncommittedBytes -= len(e.Data)
+		}
+	}
+	trunc, appended := c.log.append(es)
+	for _, e := range appended {
+		c.uncommittedBytes += len(e.Data)
+	}
+	return trunc, appended
+}
+
+// setCommit advances the commit watermark, releasing newly committed bytes
+// from the uncommitted budget (§8). Entries below the snapshot floor were
+// already released at compaction (compaction only removes committed history).
+func (c *Core) setCommit(idx Index) {
+	if idx <= c.commitIndex {
+		return
+	}
+	lo := c.commitIndex + 1
+	if lo < c.log.firstIndex() {
+		lo = c.log.firstIndex()
+	}
+	for _, e := range c.log.entries(lo, idx+1) {
+		c.uncommittedBytes -= len(e.Data)
+	}
+	c.commitIndex = idx
 }
 
 // fail transitions to the terminal Failed state (§6.2).

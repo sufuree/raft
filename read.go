@@ -41,6 +41,11 @@ func (c *Core) flushReads() {
 	}
 	c.pendingReads = nil
 	c.readRounds = append(c.readRounds, r)
+	// Self may already form a quorum (single voter): no acks will arrive, so
+	// confirm immediately (§4.3).
+	if c.config.QuorumActive(r.acks) {
+		r.confirmed = true
+	}
 	for _, set := range c.config.VoterSets() {
 		for _, id := range set {
 			if id == c.id {

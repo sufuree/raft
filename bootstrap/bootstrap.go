@@ -22,10 +22,13 @@ var (
 
 // Options describes a node's identity and runtime.
 type Options struct {
-	Device        wal.Device
-	ClusterID     uint64
-	MemberID      uint64
-	Generation    uint64
+	Device     wal.Device
+	ClusterID  uint64
+	MemberID   uint64
+	Generation uint64
+	// MaxBatchBytes bounds both the WAL append batch and the driver's limit
+	// chain (§8); zero selects the shared 8 MiB default.
+	MaxBatchBytes int
 	InitialConfig raft.Configuration
 	Driver        driver.Config
 	FSM           driver.FSM
@@ -35,13 +38,16 @@ type Options struct {
 func (o Options) walOpts() wal.Options {
 	return wal.Options{
 		ClusterID: o.ClusterID, MemberID: o.MemberID, Generation: o.Generation,
-		InitialConfig: o.InitialConfig,
+		MaxBatchBytes: o.MaxBatchBytes, InitialConfig: o.InitialConfig,
 	}
 }
 
 func build(o Options, store *wal.WAL) (*driver.Driver, error) {
 	cfg := o.Driver
 	cfg.ID = raft.NodeID(o.MemberID)
+	if cfg.MaxBatchBytes == 0 {
+		cfg.MaxBatchBytes = o.MaxBatchBytes
+	}
 	return driver.New(cfg, store, o.FSM, o.Transport)
 }
 

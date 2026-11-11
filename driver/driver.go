@@ -37,6 +37,7 @@ var (
 	ErrStopped        = errors.New("driver: stopped")
 	ErrTooLarge       = errors.New("driver: command exceeds byte limit")
 	ErrOutcomeUnknown = errors.New("driver: outcome unknown")
+	ErrLimits         = errors.New("driver: incompatible resource limits")
 )
 
 // Config configures the driver. All limits are finite (§8).
@@ -53,6 +54,11 @@ type Config struct {
 	MaxPendingProposals int
 	MaxPendingBytes     int
 	MaxInflightWork     int
+	// MaxReadWaiters caps concurrent read barriers (§8).
+	MaxReadWaiters int
+	// MaxBatchBytes is the storage append-batch limit; the command plus
+	// framing must fit it (§8). It must match the storage adapter's limit.
+	MaxBatchBytes int
 }
 
 func (c *Config) setDefaults() {
@@ -76,6 +82,12 @@ func (c *Config) setDefaults() {
 	}
 	if c.MaxInflightWork == 0 {
 		c.MaxInflightWork = 256
+	}
+	if c.MaxReadWaiters == 0 {
+		c.MaxReadWaiters = 1024
+	}
+	if c.MaxBatchBytes == 0 {
+		c.MaxBatchBytes = 8 << 20
 	}
 }
 
@@ -135,6 +147,13 @@ type stateSnapshot struct {
 // New constructs a driver from recovered storage state.
 func New(cfg Config, store raft.Storage, fsm FSM, tr Transport) (*Driver, error) {
 	cfg.setDefaults()
+	// Limit chain (§8): the maximum command plus framing must fit an append
+	// batch; the transport handshake enforces batch <= every peer's decode
+	// limit at every connection.
+	if cfg.MaxCommandBytes+raft.FramingReserve > cfg.MaxBatchBytes {
+		return nil, fmt.Errorf("%w: command %d + framing %d exceeds batch %d",
+			ErrLimits, cfg.MaxCommandBytes, raft.FramingReserve, cfg.MaxBatchBytes)
+	}
 	init, err := store.Load()
 	if err != nil {
 		return nil, err
@@ -468,6 +487,9 @@ func (d *Driver) Propose(ctx context.Context, data []byte) (Result, error) {
 		if r.Outcome == raft.OutcomeRejected {
 			return r, ErrNotLeader
 		}
+		if r.Outcome == raft.OutcomeOverload {
+			return r, ErrOverload
+		}
 		if r.Outcome == raft.OutcomeUnknown {
 			return r, ErrOutcomeUnknown
 		}
@@ -483,6 +505,14 @@ func (d *Driver) Read(ctx context.Context) (raft.Index, error) {
 	if d.failed {
 		d.mu.Unlock()
 		return 0, ErrFailed
+	}
+	if d.stopped {
+		d.mu.Unlock()
+		return 0, ErrStopped
+	}
+	if len(d.readWait) >= d.cfg.MaxReadWaiters {
+		d.mu.Unlock()
+		return 0, ErrOverload
 	}
 	id := fmt.Sprintf("r-%d-%d", d.cfg.ID, atomic.AddUint64(&d.nextID, 1))
 	ch := make(chan raft.ReadResult, 1)
@@ -524,6 +554,9 @@ func (d *Driver) ConfChange(ctx context.Context, target raft.Configuration) (Res
 	case r := <-ch:
 		if r.Outcome == raft.OutcomeRejected {
 			return r, ErrNotLeader
+		}
+		if r.Outcome == raft.OutcomeOverload {
+			return r, ErrOverload
 		}
 		return r, nil
 	case <-d.stop:

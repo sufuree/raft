@@ -123,9 +123,18 @@ func (c *Core) handleAppend(m Message) {
 		return
 	}
 
+	// Never overwrite committed entries (§4): refuse a conflicting suffix
+	// that would truncate the committed prefix, before mutating the log.
+	if conflict := c.log.conflictIndex(m.Entries); conflict > 0 && conflict <= c.commitIndex {
+		c.out.msg(Message{
+			Type: MsgAppendResp, From: c.id, To: m.From, Term: c.term,
+			Reject: true, RejectHint: c.commitIndex,
+		}, 0)
+		return
+	}
 	lastNew := m.LogIndex + Index(len(m.Entries))
-	trunc, appended := c.log.append(m.Entries)
-	// Never overwrite committed entries (§4).
+	trunc, appended := c.appendLog(m.Entries)
+	// Defense in depth: the pre-check above makes this unreachable.
 	if trunc > 0 && trunc <= c.commitIndex {
 		return
 	}

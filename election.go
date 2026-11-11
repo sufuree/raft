@@ -120,7 +120,7 @@ func (c *Core) becomeLeader() {
 	// Append a no-op in the current term so idle clusters establish current-term
 	// commitment and can complete read barriers (§4).
 	noop := Entry{Term: c.term, Index: c.log.lastIndex() + 1, Type: EntryNormal}
-	c.log.append([]Entry{noop})
+	c.appendLog([]Entry{noop})
 	c.leaderNoopIndex = noop.Index
 	c.persistEntries(0, []Entry{noop}, nil)
 	c.emitStatus("became leader")
@@ -133,8 +133,14 @@ func (c *Core) propose(id uint64, data []byte) {
 		c.out.Proposals = append(c.out.Proposals, ProposalResult{ID: id, Outcome: OutcomeRejected})
 		return
 	}
+	if c.uncommittedBytes+len(data) > c.cfg.MaxUncommittedBytes {
+		// Typed overload before admission (§8): the uncommitted log may not
+		// grow without bound while a minority lags.
+		c.out.Proposals = append(c.out.Proposals, ProposalResult{ID: id, Outcome: OutcomeOverload})
+		return
+	}
 	e := Entry{Term: c.term, Index: c.log.lastIndex() + 1, Type: EntryNormal, Data: data}
-	c.log.append([]Entry{e})
+	c.appendLog([]Entry{e})
 	c.proposals[id] = proposalTrack{index: e.Index, term: e.Term}
 	c.persistEntries(0, []Entry{e}, nil)
 	c.broadcastAppend()
@@ -157,9 +163,14 @@ func (c *Core) proposeConfChange(id uint64, target Configuration) {
 		Learners: target.Learners,
 		Joint:    &JointConfig{OldVoters: append(NodeSet(nil), c.config.Voters...)},
 	}
+	data := confEncode(joint)
+	if c.uncommittedBytes+len(data) > c.cfg.MaxUncommittedBytes {
+		c.out.Proposals = append(c.out.Proposals, ProposalResult{ID: id, Outcome: OutcomeOverload})
+		return
+	}
 	c.pendingConfTarget = &target
-	e := Entry{Term: c.term, Index: c.log.lastIndex() + 1, Type: EntryConfChange, Data: confEncode(joint)}
-	c.log.append([]Entry{e})
+	e := Entry{Term: c.term, Index: c.log.lastIndex() + 1, Type: EntryConfChange, Data: data}
+	c.appendLog([]Entry{e})
 	c.applyConfigDelta(0, []Entry{e})
 	c.proposals[id] = proposalTrack{index: e.Index, term: e.Term}
 	c.persistEntries(0, []Entry{e}, nil)
@@ -179,7 +190,7 @@ func (c *Core) finalizeConfChange() {
 	target := *c.pendingConfTarget
 	c.pendingConfTarget = nil
 	e := Entry{Term: c.term, Index: c.log.lastIndex() + 1, Type: EntryConfChange, Data: confEncode(target)}
-	c.log.append([]Entry{e})
+	c.appendLog([]Entry{e})
 	c.applyConfigDelta(0, []Entry{e})
 	c.persistEntries(0, []Entry{e}, nil)
 	c.broadcastAppend()
@@ -210,7 +221,7 @@ func (c *Core) maybeCommit() {
 		q := quorumIndex(c.config.VoterSets(), match, c.id, c.durableIndex)
 		if q > c.commitIndex && q <= c.durableIndex && c.log.matchTerm(q, c.term) {
 			c.record("commit", q, fmt.Sprintf("selfDurable=%d match=%v", c.durableIndex, match))
-			c.commitIndex = q
+			c.setCommit(q)
 			if q >= c.leaderNoopIndex {
 				c.currentTermCommitted = true
 			}
@@ -233,7 +244,7 @@ func (c *Core) maybeCommit() {
 	}
 	if candidate > c.commitIndex {
 		c.record("adopt", candidate, fmt.Sprintf("leaderCommit=%d last=%d durable=%d", c.leaderCommit, c.log.lastIndex(), c.durableIndex))
-		c.commitIndex = candidate
+		c.setCommit(candidate)
 		c.persistCommitWatermark(candidate)
 	}
 }
@@ -349,6 +360,8 @@ func (c *Core) onSnapshotInstalled(ev Event) {
 	}
 	c.leaderCommit = c.commitIndex
 	c.leaderMatch = snap.Index
+	// The log resets to the snapshot floor, which is fully committed.
+	c.uncommittedBytes = 0
 	c.resolveProposals()
 	c.emitStatus("snapshot installed")
 	// Acknowledge the snapshot to the leader.

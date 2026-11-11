@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/gob"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -273,5 +274,115 @@ func TestOrderedPersistence(t *testing.T) {
 	}
 	if store.saves.Load() < 200 {
 		t.Fatalf("expected >=200 saves, got %d", store.saves.Load())
+	}
+}
+
+// stallFSM blocks application so read barriers accumulate waiters.
+type stallFSM struct {
+	testFSM
+	gate chan struct{}
+}
+
+func (f *stallFSM) Apply(entries []raft.Entry) error {
+	<-f.gate
+	return f.testFSM.Apply(entries)
+}
+
+// TestReadWaiterCap: concurrent read barriers are bounded; excess callers
+// receive typed overload (§8).
+func TestReadWaiterCap(t *testing.T) {
+	store := raft.NewMemStorage()
+	store.SetInitialConfig(raft.Configuration{Voters: raft.NodeSet{1}})
+	fsm := &stallFSM{testFSM: testFSM{cmds: make(map[raft.Index][]byte)}, gate: make(chan struct{})}
+	d, err := New(Config{ID: 1, ElectionTick: 5, HeartbeatTick: 1, TickInterval: time.Millisecond,
+		MaxReadWaiters: 2}, store, fsm, NewLoopNetwork().NewTransport(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Start()
+	defer d.Stop()
+	gateClosed := false
+	defer func() {
+		if !gateClosed {
+			close(fsm.gate)
+		}
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for !d.IsLeader() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if !d.IsLeader() {
+		t.Fatal("no leader")
+	}
+	// The stalled FSM keeps applied below the barrier index, so reads wait.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			d.Read(ctx) // outcome irrelevant; these occupy the waiter slots
+		}()
+	}
+	// Wait for both waiters to register.
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		d.mu.Lock()
+		n := len(d.readWait)
+		d.mu.Unlock()
+		if n == 2 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if _, err := d.Read(ctx); !errors.Is(err, ErrOverload) {
+		t.Fatalf("want ErrOverload beyond waiter cap, got %v", err)
+	}
+	gateClosed = true
+	close(fsm.gate) // release; waiters drain
+	wg.Wait()
+}
+
+// TestLimitChainValidation: command plus framing must fit the append batch
+// (§8); an incompatible configuration is refused at construction.
+func TestLimitChainValidation(t *testing.T) {
+	store := raft.NewMemStorage()
+	store.SetInitialConfig(raft.Configuration{Voters: raft.NodeSet{1}})
+	_, err := New(Config{ID: 1, MaxCommandBytes: 8 << 20, MaxBatchBytes: 1 << 20},
+		store, newTestFSM(), NewLoopNetwork().NewTransport(1))
+	if !errors.Is(err, ErrLimits) {
+		t.Fatalf("want ErrLimits, got %v", err)
+	}
+}
+
+// TestSingleNodeReadBarrier: a single-voter cluster completes read barriers
+// with no peers to acknowledge (regression: the confirmation round was never
+// marked confirmed when self alone formed the quorum).
+func TestSingleNodeReadBarrier(t *testing.T) {
+	store := raft.NewMemStorage()
+	store.SetInitialConfig(raft.Configuration{Voters: raft.NodeSet{1}})
+	d, err := New(Config{ID: 1, ElectionTick: 5, HeartbeatTick: 1, TickInterval: time.Millisecond},
+		store, newTestFSM(), NewLoopNetwork().NewTransport(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Start()
+	defer d.Stop()
+	deadline := time.Now().Add(5 * time.Second)
+	for !d.IsLeader() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := d.Propose(ctx, []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	idx, err := d.Read(ctx)
+	if err != nil {
+		t.Fatalf("single-voter read barrier failed: %v", err)
+	}
+	if idx < 2 {
+		t.Fatalf("read index %d too low", idx)
 	}
 }
