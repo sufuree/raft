@@ -405,7 +405,14 @@ func (c *Core) tick() {
 			c.broadcastHeartbeat()
 		}
 		if c.cfg.CheckQuorum && c.quorumElapsed >= c.cfg.ElectionTick {
-			if !c.quorumRecentlyActive() {
+			active := c.quorumRecentlyActive()
+			// Decay the contact window: only contacts within the last interval
+			// count toward the next check (§4.2).
+			for _, id := range c.sortedProgress() {
+				c.progress[id].RecentActive = false
+			}
+			c.quorumElapsed = 0
+			if !active {
 				c.becomeFollower(c.term, 0)
 				c.emitStatus("check-quorum: no quorum contact")
 			}
@@ -414,6 +421,11 @@ func (c *Core) tick() {
 	}
 	c.electionElapsed++
 	c.leaderSeenElapsed++
+	// Only voters campaign: learners and removed members must not raise terms
+	// or disrupt the voting set (§4.4, §9).
+	if !c.config.HasVoter(c.id) {
+		return
+	}
 	if c.electionElapsed >= c.randomizedElectionTimeout {
 		c.electionElapsed = 0
 		if c.cfg.PreVote {

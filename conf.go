@@ -136,6 +136,17 @@ func (c *Core) reconcileProgress() {
 	for _, id := range c.config.Learners {
 		wanted[id] = true
 	}
+	// Retain removed peers until they have matched the latest configuration
+	// entry; otherwise they are stranded in a joint view that still lists
+	// them as voters (§4.4). Peers named by uncommitted transitions are
+	// seeded at election (becomeLeader).
+	if e, ok := c.log.scanConf(c.log.lastIndex()); ok {
+		for id, p := range c.progress {
+			if !wanted[id] && p.Match < e.Index {
+				wanted[id] = true
+			}
+		}
+	}
 	for id := range wanted {
 		if _, ok := c.progress[id]; !ok {
 			c.progress[id] = &Progress{Next: next, Match: 0, RecentActive: true}
@@ -145,6 +156,13 @@ func (c *Core) reconcileProgress() {
 		if !wanted[id] {
 			delete(c.progress, id)
 		}
+	}
+	// A leader removed from the configuration steps down once the final
+	// configuration activates; otherwise its heartbeats would suppress
+	// elections among the remaining voters indefinitely (§4.4).
+	if c.role == Leader && !c.config.HasVoter(c.id) {
+		c.becomeFollower(c.term, 0)
+		c.emitStatus("removed from configuration")
 	}
 }
 

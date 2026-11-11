@@ -132,16 +132,25 @@ type Simulator struct {
 
 	chunkBytes   int
 	maxSnapBytes int
+
+	proposeTime map[uint64]int
+	readTime    map[string]int
 }
 
-// HistoryOp records a client-visible operation for linearizability checking.
+// HistoryOp records a client-visible operation for linearizability checking
+// (§11). Time is the logical tick of the invoke (propose/read) or return
+// (result/read completion).
 type HistoryOp struct {
-	Kind  string // "propose", "read", "result"
-	Node  raft.NodeID
-	ID    uint64
-	Index raft.Index
-	Data  []byte
-	Ok    bool
+	Kind    string // "propose", "read", "result"
+	Node    raft.NodeID
+	ID      uint64
+	Index   raft.Index
+	Data    []byte
+	Ok      bool
+	Time    int    // invoke tick
+	End     int    // return tick (reads)
+	Value   string // read return value
+	Unknown bool   // write admitted with unknown outcome
 }
 
 // Config configures a simulator run.
@@ -175,6 +184,8 @@ func New(cfg Config) *Simulator {
 		leaders:      make(map[raft.Term]raft.NodeID),
 		chunkBytes:   cfg.SnapshotChunkBytes,
 		maxSnapBytes: cfg.MaxSnapshotBytes,
+		proposeTime:  make(map[uint64]int),
+		readTime:     make(map[string]int),
 	}
 	voters := cfg.Voters
 	if voters == nil {
@@ -221,7 +232,8 @@ func (s *Simulator) Propose(id raft.NodeID, data []byte) uint64 {
 	if n == nil || !n.Alive {
 		return pid
 	}
-	s.history = append(s.history, HistoryOp{Kind: "propose", Node: id, ID: pid, Data: data})
+	s.history = append(s.history, HistoryOp{Kind: "propose", Node: id, ID: pid, Data: data, Time: s.Time})
+	s.proposeTime[pid] = s.Time
 	out := n.Core.Step(raft.Event{Kind: raft.EvPropose, WorkID: pid, Data: data})
 	s.drain(n, out)
 	return pid
@@ -233,8 +245,14 @@ func (s *Simulator) Read(id raft.NodeID, ctx []byte) {
 	if n == nil || !n.Alive {
 		return
 	}
+	s.readTime[string(ctx)] = s.Time
 	out := n.Core.Step(raft.Event{Kind: raft.EvReadBarrier, ReadCtx: ctx})
 	s.drain(n, out)
+}
+
+// History returns a copy of the recorded client-visible history.
+func (s *Simulator) History() []HistoryOp {
+	return append([]HistoryOp(nil), s.history...)
 }
 
 // ConfChange proposes a membership transition on the leader.
@@ -384,10 +402,27 @@ func (s *Simulator) drain(n *Node, out raft.Outputs) {
 		s.applyWork(n, w)
 	}
 	for _, r := range out.Reads {
-		s.history = append(s.history, HistoryOp{Kind: "read", Node: n.ID, Index: r.Index, Ok: r.Err == nil})
+		h := HistoryOp{Kind: "read", Node: n.ID, Index: r.Index, Ok: r.Err == nil,
+			Time: s.readTime[string(r.Ctx)], End: s.Time}
+		if r.Err == nil {
+			// The barrier guarantees applied >= index: the returned value is
+			// the register state at the greatest command index <= barrier.
+			var best raft.Index
+			for idx := range n.FSM.Commands {
+				if idx <= r.Index && idx > best {
+					best = idx
+				}
+			}
+			if best > 0 {
+				h.Value = string(n.FSM.Commands[best])
+			}
+		}
+		s.history = append(s.history, h)
 	}
 	for _, p := range out.Proposals {
-		s.history = append(s.history, HistoryOp{Kind: "result", Node: n.ID, ID: p.ID, Index: p.Index, Ok: p.Outcome == raft.OutcomeApplied})
+		h := HistoryOp{Kind: "result", Node: n.ID, ID: p.ID, Index: p.Index, Time: s.Time,
+			Ok: p.Outcome == raft.OutcomeApplied, Unknown: p.Outcome == raft.OutcomeUnknown}
+		s.history = append(s.history, h)
 	}
 	if out.Status != nil && out.Status.Role == raft.Leader {
 		s.leaders[out.Status.Term] = n.ID

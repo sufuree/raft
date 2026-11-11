@@ -31,8 +31,15 @@ func (id NodeID) uint() uint64 { return uint64(id) }
 // flushReads sends one confirmation round for all reads captured since the last
 // round was sent. Reads may join a batch only before that round is sent.
 func (c *Core) flushReads() {
-	if len(c.pendingReads) == 0 || c.role != Leader {
+	if len(c.pendingReads) == 0 || c.role != Leader || !c.currentTermCommitted {
 		return
+	}
+	// Reads that arrived before the current-term entry committed capture the
+	// commit index now — never index 0 (§4.3).
+	for i := range c.pendingReads {
+		if c.pendingReads[i].index == 0 {
+			c.pendingReads[i].index = c.commitIndex
+		}
 	}
 	r := &readRound{
 		ctx:   c.roundCtx(),

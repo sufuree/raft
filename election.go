@@ -118,6 +118,41 @@ func (c *Core) becomeLeader() {
 			c.progress[id] = &Progress{Next: next, Match: 0, RecentActive: true}
 		}
 	}
+	// Seed replication targets from every configuration entry in the log so
+	// members named by an in-progress transition (including ones the current
+	// configuration removes) receive it (§4.4, §6.1).
+	for _, e := range c.log.ents[1:] {
+		if e.Type != EntryConfChange {
+			continue
+		}
+		cfg, err := confDecode(e.Data)
+		if err != nil {
+			continue
+		}
+		for _, set := range cfg.VoterSets() {
+			for _, id := range set {
+				if id != c.id {
+					if _, ok := c.progress[id]; !ok {
+						c.progress[id] = &Progress{Next: next, Match: 0, RecentActive: true}
+					}
+				}
+			}
+		}
+		for _, id := range cfg.Learners {
+			if _, ok := c.progress[id]; !ok {
+				c.progress[id] = &Progress{Next: next, Match: 0, RecentActive: true}
+			}
+		}
+	}
+	// A pending joint transition in the log must be completed by any leader,
+	// not only its proposer (§6.1, §9): derive the final target from the
+	// latest configuration entry when it is joint.
+	if e, ok := c.log.scanConf(c.log.lastIndex()); ok {
+		if cfg, err := confDecode(e.Data); err == nil && cfg.InJoint() {
+			target := Configuration{Voters: cfg.Voters, Learners: cfg.Learners}
+			c.pendingConfTarget = &target
+		}
+	}
 	// Append a no-op in the current term so idle clusters establish current-term
 	// commitment and can complete read barriers (§4).
 	noop := Entry{Term: c.term, Index: c.log.lastIndex() + 1, Type: EntryNormal}
@@ -227,6 +262,7 @@ func (c *Core) maybeCommit() {
 				c.currentTermCommitted = true
 			}
 			c.persistCommitWatermark(q)
+			c.reconcileProgress() // drop peers removed by a now-committed config
 			c.finalizeConfChange()
 			c.resolveProposals()
 		}
@@ -281,6 +317,9 @@ func (c *Core) broadcastHeartbeat() {
 
 // broadcastAppend sends AppendEntries (or snapshots) to each peer.
 func (c *Core) broadcastAppend() {
+	if c.role != Leader {
+		return // a leader removed mid-finalization must not replicate
+	}
 	for _, id := range c.sortedProgress() {
 		c.sendAppend(id, c.progress[id])
 	}

@@ -110,6 +110,9 @@ func (c *Core) handleVoteResp(m Message) {
 }
 
 func (c *Core) handleAppend(m Message) {
+	if c.role == Candidate || c.role == PreCandidate {
+		c.becomeFollower(c.term, m.From) // leader contact at own term (§4)
+	}
 	c.leader = m.From
 	c.leaderSeenElapsed = 0
 	c.electionElapsed = 0
@@ -216,6 +219,9 @@ func (c *Core) handleAppendResp(m Message) {
 }
 
 func (c *Core) handleHeartbeat(m Message) {
+	if c.role == Candidate || c.role == PreCandidate {
+		c.becomeFollower(c.term, m.From)
+	}
 	c.leader = m.From
 	c.leaderSeenElapsed = 0
 	c.electionElapsed = 0

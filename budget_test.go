@@ -26,6 +26,7 @@ func drive(c *Core, out Outputs) Outputs {
 		out.Work = append(out.Work, more.Work...)
 		out.Messages = append(out.Messages, more.Messages...)
 		out.Proposals = append(out.Proposals, more.Proposals...)
+		out.Reads = append(out.Reads, more.Reads...)
 	}
 	return out
 }
@@ -155,4 +156,136 @@ func TestIdempotentAppendNoPersist(t *testing.T) {
 	if ack == nil || ack.Message.Reject || ack.Message.MatchIndex != last || ack.After != 0 {
 		t.Fatalf("expected immediate ack at %d, got %+v", last, ack)
 	}
+}
+
+// TestReadBeforeCurrentTermCommit: a read arriving before the new leader's
+// current-term entry commits must capture the commit index once it commits,
+// never index 0 (regression: stale linearizable read, RFC §4.3).
+func TestReadBeforeCurrentTermCommit(t *testing.T) {
+	c := singleLeader(t, Config{ElectionTick: 5, HeartbeatTick: 1})
+	for i := 0; i < 3; i++ {
+		drive(c, c.Step(Event{Kind: EvPropose, WorkID: uint64(i + 1), Data: []byte("cmd")}))
+	}
+	_, commit, _, _, _ := c.Watermarks()
+	if commit < 4 {
+		t.Fatalf("commit %d too low", commit)
+	}
+	// Step down to a higher term, then re-elect (single voter).
+	c.Step(Event{Kind: EvReceive, Message: Message{Type: MsgHeartbeat, From: 2, To: 1, Term: c.Term() + 1, Commit: commit}})
+	var electOut Outputs
+	for i := 0; i < 30 && c.Role() != Leader; i++ {
+		electOut = c.Step(Event{Kind: EvTick}) // work stays outstanding: noop uncommitted
+	}
+	if c.Role() != Leader {
+		t.Fatal("no re-election")
+	}
+	// Read arrives before the current-term noop commits.
+	out := c.Step(Event{Kind: EvReadBarrier, ReadCtx: []byte("early")})
+	if len(out.Reads) != 0 {
+		t.Fatalf("read completed before current-term commit: %+v", out.Reads)
+	}
+	// Complete the noop; the read must capture the real commit index.
+	out = drive(c, electOut)
+	var got *ReadResult
+	for i := range out.Reads {
+		if string(out.Reads[i].Ctx) == "early" {
+			got = &out.Reads[i]
+		}
+	}
+	if got == nil {
+		t.Fatal("early read never completed")
+	}
+	if got.Err != nil || got.Index < commit {
+		t.Fatalf("early read stale: index %d < prior commit %d (err %v)", got.Index, commit, got.Err)
+	}
+}
+
+// TestReadAfterRoundSent: a read arriving after a confirmation round was sent
+// joins the NEXT round; acknowledgements for the earlier round cannot
+// establish its barrier (§4.3, §11 reads gate).
+func TestReadAfterRoundSent(t *testing.T) {
+	c := NewCore(Config{ID: 1, ElectionTick: 5, HeartbeatTick: 1},
+		InitState{Config: Configuration{Voters: NodeSet{1, 2, 3}}})
+	// Elect with votes from 2 and 3; virtual followers ack appends so the
+	// noop commits.
+	ack := func(o Outputs) {
+		for len(o.Messages) > 0 {
+			msgs := o.Messages
+			o.Messages = nil
+			for _, om := range msgs {
+				m := om.Message
+				switch m.Type {
+				case MsgVote, MsgPreVote:
+					resp := MsgVoteResp
+					if m.Type == MsgPreVote {
+						resp = MsgPreVoteResp
+					}
+					more := drive(c, c.Step(Event{Kind: EvReceive, Message: Message{Type: resp, From: m.To, To: 1, Term: m.Term}}))
+					o.Messages = append(o.Messages, more.Messages...)
+				case MsgAppend:
+					more := drive(c, c.Step(Event{Kind: EvReceive, Message: Message{
+						Type: MsgAppendResp, From: m.To, To: 1, Term: m.Term,
+						MatchIndex: m.LogIndex + Index(len(m.Entries)),
+					}}))
+					o.Messages = append(o.Messages, more.Messages...)
+				}
+			}
+		}
+	}
+	for i := 0; i < 30 && c.Role() != Leader; i++ {
+		ack(drive(c, c.Step(Event{Kind: EvTick})))
+	}
+	if c.Role() != Leader {
+		t.Fatal("no leader")
+	}
+	for i := 0; i < 5 && !c.currentTermCommitted; i++ {
+		ack(drive(c, c.Step(Event{Kind: EvTick})))
+	}
+	if !c.currentTermCommitted {
+		t.Fatal("noop not committed")
+	}
+	// Read 1 flushes round 1.
+	var out Outputs
+	c.Step(Event{Kind: EvReadBarrier, ReadCtx: []byte("r1")})
+	var ctx1, ctx2 []byte
+	for _, om := range c.out.Messages {
+		if om.Message.Type == MsgHeartbeat && len(om.Message.ReadCtx) > 0 {
+			ctx1 = om.Message.ReadCtx
+		}
+	}
+	if ctx1 == nil {
+		t.Fatal("round 1 not sent")
+	}
+	// Read 2 arrives after round 1 was sent: it must get its own round.
+	c.Step(Event{Kind: EvReadBarrier, ReadCtx: []byte("r2")})
+	for _, om := range c.out.Messages {
+		if om.Message.Type == MsgHeartbeat && len(om.Message.ReadCtx) > 0 && !bytesEqual(om.Message.ReadCtx, ctx1) {
+			ctx2 = om.Message.ReadCtx
+		}
+	}
+	if ctx2 == nil {
+		t.Fatal("read 2 did not get a new round")
+	}
+	// Ack round 1 from a majority: r1 completes, r2 must not.
+	out = c.Step(Event{Kind: EvReceive, Message: Message{Type: MsgHeartbeatResp, From: 2, To: 1, Term: c.Term(), ReadCtx: ctx1}})
+	out2 := c.Step(Event{Kind: EvReceive, Message: Message{Type: MsgHeartbeatResp, From: 3, To: 1, Term: c.Term(), ReadCtx: ctx1}})
+	done := map[string]bool{}
+	for _, r := range append(out.Reads, out2.Reads...) {
+		done[string(r.Ctx)] = true
+	}
+	if !done["r1"] {
+		t.Fatal("r1 not confirmed by its round")
+	}
+	if done["r2"] {
+		t.Fatal("r2 confirmed by an earlier round's acknowledgements")
+	}
+	// Ack round 2: r2 completes.
+	out = c.Step(Event{Kind: EvReceive, Message: Message{Type: MsgHeartbeatResp, From: 2, To: 1, Term: c.Term(), ReadCtx: ctx2}})
+	out2 = c.Step(Event{Kind: EvReceive, Message: Message{Type: MsgHeartbeatResp, From: 3, To: 1, Term: c.Term(), ReadCtx: ctx2}})
+	for _, r := range append(out.Reads, out2.Reads...) {
+		if string(r.Ctx) == "r2" && r.Err == nil {
+			return
+		}
+	}
+	t.Fatal("r2 never confirmed by its own round")
 }
