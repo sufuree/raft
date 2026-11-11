@@ -6,6 +6,8 @@ import (
 	"encoding/gob"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -517,4 +519,197 @@ func TestPreflightRejectsAdmission(t *testing.T) {
 	if d.Role() == raft.Failed {
 		t.Fatal("preflight rejection must not fail the node")
 	}
+}
+
+// TestLargeSnapshotStreamedCatchUp exercises the full streaming chain: core
+// chunking, driver staging files with end-to-end CRC, WAL chunked
+// publication, and recovery (§6.4).
+func TestLargeSnapshotStreamedCatchUp(t *testing.T) {
+	net := NewLoopNetwork()
+	voters := raft.Configuration{Voters: raft.NodeSet{1, 2, 3}}
+	stagingDir := t.TempDir()
+	type node struct {
+		d     *Driver
+		fsm   *testFSM
+		dev   *wal.MemDevice
+		store *wal.WAL
+	}
+	mkNode := func(id raft.NodeID) *node {
+		dev := wal.NewMemDevice()
+		store, err := wal.Open(dev, wal.Options{
+			ClusterID: 1, MemberID: uint64(id), InitialConfig: voters,
+			SegmentSize: 64 << 10, MaxBatchBytes: 32 << 10,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		fsm := newTestFSM()
+		d, err := New(Config{
+			ID: id, ElectionTick: 10, HeartbeatTick: 2, PreVote: true, CheckQuorum: true,
+			Seed: int64(id) * 100, TickInterval: time.Millisecond,
+			SnapshotChunkBytes: 4 << 10, StagingDir: stagingDir,
+			MaxBatchBytes: 32 << 10, MaxCommandBytes: 16 << 10,
+		}, store, fsm, net.NewTransport(id))
+		if err != nil {
+			t.Fatal(err)
+		}
+		d.Start()
+		return &node{d: d, fsm: fsm, dev: dev, store: store}
+	}
+	nodes := []*node{mkNode(1), mkNode(2), mkNode(3)}
+	defer func() {
+		for _, n := range nodes {
+			n.d.Stop()
+		}
+	}()
+	var leader *node
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, n := range nodes {
+			if n.d.IsLeader() {
+				leader = n
+			}
+		}
+		if leader != nil {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if leader == nil {
+		t.Fatal("no leader")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	payload := bytes.Repeat([]byte("z"), 2<<10)
+	for i := 0; i < 100; i++ {
+		if _, err := leader.d.Propose(ctx, payload); err != nil {
+			state := ""
+			for j, n := range nodes {
+				du, co, pe, di, ap := n.d.Watermarks()
+				state += fmt.Sprintf("n%d=%v/t%d/leader%d/wm[%d,%d,%d,%d,%d]/fail%q ", j+1, n.d.Role(), n.d.Term(), n.d.Leader(), du, co, pe, di, ap, n.d.FailReason())
+			}
+			t.Fatalf("propose %d: %v; state=[%s]", i, err, state)
+		}
+	}
+	// Stop a follower, then advance and compact the leader's history well
+	// past the follower's match so catch-up requires a snapshot.
+	lag := nodes[2]
+	if lag == leader {
+		lag = nodes[1]
+	}
+	lag.d.Stop()
+	for i := 0; i < 50; i++ {
+		if _, err := leader.d.Propose(ctx, payload); err != nil {
+			state := ""
+			for j, n := range nodes {
+				du, co, pe, di, ap := n.d.Watermarks()
+				state += fmt.Sprintf("n%d=%v/t%d/leader%d/wm[%d,%d,%d,%d,%d]/fail%q ", j+1, n.d.Role(), n.d.Term(), n.d.Leader(), du, co, pe, di, ap, n.d.FailReason())
+			}
+			leaderIdx, lagIdx := 0, 0
+			for j, n := range nodes {
+				if n == leader {
+					leaderIdx = j + 1
+				}
+				if n == lag {
+					lagIdx = j + 1
+				}
+			}
+			t.Fatalf("post-stop propose %d: %v; leader=n%d lag=n%d state=[%s]", i, err, leaderIdx, lagIdx, state)
+		}
+	}
+	leader.d.Snapshot()
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		snap, _ := leader.store.ReadSnapshot()
+		if snap.Index >= 100 {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if snap, _ := leader.store.ReadSnapshot(); snap.Index < 100 {
+		t.Fatalf("leader snapshot not published: %d", snap.Index)
+	}
+	// Restart the lagging follower on its durable device.
+	lag.store = nil
+	dev := lag.dev
+	store, err := wal.Open(dev, wal.Options{
+		ClusterID: 1, MemberID: uint64(lag.d.cfg.ID), InitialConfig: voters,
+		SegmentSize: 64 << 10, MaxBatchBytes: 32 << 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fsm := newTestFSM()
+	d, err := New(Config{
+		ID: lag.d.cfg.ID, ElectionTick: 10, HeartbeatTick: 2, PreVote: true, CheckQuorum: true,
+		Seed: 999, TickInterval: time.Millisecond,
+		SnapshotChunkBytes: 4 << 10, StagingDir: stagingDir,
+		MaxBatchBytes: 32 << 10, MaxCommandBytes: 16 << 10,
+	}, store, fsm, net.NewTransport(lag.d.cfg.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lag.d = d
+	lag.fsm = fsm
+	lag.store = store
+	d.Start()
+	// Catch-up must complete through the streamed snapshot.
+	deadline = time.Now().Add(30 * time.Second)
+	caught := false
+	for time.Now().Before(deadline) {
+		_, _, _, _, apL := leader.d.Watermarks()
+		_, _, _, _, apF := lag.d.Watermarks()
+		if apF >= apL && apL >= 150 {
+			caught = true
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !caught {
+		_, _, _, _, apL := leader.d.Watermarks()
+		_, _, _, _, apF := lag.d.Watermarks()
+		matches, _ := filepath.Glob(filepath.Join(stagingDir, "*.staging"))
+		var sizes []int64
+		for _, m := range matches {
+			fi, _ := os.Stat(m)
+			if fi != nil {
+				sizes = append(sizes, fi.Size())
+			}
+		}
+		lsnap, _ := leader.store.ReadSnapshot()
+		roles := ""
+		for i, n := range nodes {
+			roles += fmt.Sprintf("n%d=%v/leader%d ", i+1, n.d.Role(), n.d.Leader())
+		}
+		reasons := ""
+		for i, n := range nodes {
+			if r := n.d.FailReason(); r != "" {
+				reasons += fmt.Sprintf("n%d:%q ", i+1, r)
+			}
+		}
+		t.Fatalf("streamed catch-up failed: leader %d follower %d leaderSnap=%d staging=%v sizes=%v roles=[%s] reasons=[%s]",
+			apL, apF, lsnap.Index, matches, sizes, roles, reasons)
+	}
+	fs, _ := lag.store.ReadSnapshot()
+	if fs.Index == 0 || len(fs.Data) < 100<<10 {
+		t.Fatalf("follower snapshot missing or small: index %d bytes %d", fs.Index, len(fs.Data))
+	}
+	// Staging files are removed after a successful install.
+	if matches, _ := filepath.Glob(filepath.Join(stagingDir, "*.staging")); len(matches) != 0 {
+		t.Fatalf("staging files left behind: %v", matches)
+	}
+	// The restarted follower recovers its streamed snapshot from the WAL.
+	d.Stop()
+	store2, err := wal.Open(dev, wal.Options{
+		ClusterID: 1, MemberID: uint64(d.cfg.ID), InitialConfig: voters,
+		SegmentSize: 64 << 10, MaxBatchBytes: 32 << 10,
+	})
+	if err != nil {
+		t.Fatalf("reopen after streamed install: %v", err)
+	}
+	st, _ := store2.Load()
+	if st.Snapshot.Index != fs.Index || len(st.Snapshot.Data) != len(fs.Data) {
+		t.Fatalf("streamed snapshot not recoverable: %d vs %d", st.Snapshot.Index, fs.Index)
+	}
+	store2.Close()
 }

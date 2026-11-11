@@ -122,3 +122,37 @@ func TestUncommittedBudget(t *testing.T) {
 	}
 	drive(c, out)
 }
+
+// TestIdempotentAppendNoPersist: an AppendEntries that adds nothing new and
+// carries no new commit hint is acknowledged without a persistence batch.
+// Regression: re-persisting idempotent appends amplified probe traffic into
+// storage load and stalled replication under burst.
+func TestIdempotentAppendNoPersist(t *testing.T) {
+	c := singleLeader(t, Config{ElectionTick: 5, HeartbeatTick: 1})
+	out := drive(c, c.Step(Event{Kind: EvPropose, WorkID: 1, Data: []byte("cmd")}))
+	_ = out
+	_, commit, _, _, _ := c.Watermarks()
+	last := c.log.lastIndex()
+	term := c.log.lastTerm()
+	// Re-deliver the same suffix with the same commit hint.
+	out = c.Step(Event{Kind: EvReceive, Message: Message{
+		Type: MsgAppend, From: 2, To: 1, Term: c.Term(),
+		LogIndex: last - 1, LogTerm: c.log.term(last - 1),
+		Entries: []Entry{{Term: term, Index: last, Data: []byte("cmd")}},
+		Commit:  commit,
+	}})
+	for _, w := range out.Work {
+		if w.Kind == WorkPersist {
+			t.Fatal("idempotent append generated a persistence batch")
+		}
+	}
+	var ack *OutMessage
+	for i := range out.Messages {
+		if out.Messages[i].Message.Type == MsgAppendResp {
+			ack = &out.Messages[i]
+		}
+	}
+	if ack == nil || ack.Message.Reject || ack.Message.MatchIndex != last || ack.After != 0 {
+		t.Fatalf("expected immediate ack at %d, got %+v", last, ack)
+	}
+}

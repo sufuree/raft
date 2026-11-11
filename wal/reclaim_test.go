@@ -33,6 +33,23 @@ func seedEntries(t *testing.T, w *WAL, n int) {
 	}
 }
 
+// seedLargeEntries writes entries that span multiple segments so checkpoint
+// alignment leaves a reclaimable dead prefix.
+func seedLargeEntries(t *testing.T, w *WAL, n int) {
+	t.Helper()
+	payload := bytes.Repeat([]byte("x"), 1024)
+	for i := 1; i <= n; i++ {
+		commit := raft.Index(i)
+		err := w.Save(raft.PersistBatch{
+			Entries: []raft.Entry{{Term: 1, Index: raft.Index(i), Data: payload}},
+			Commit:  &commit,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 // TestReclamationPreservesRecoverability: compaction reclaims the dead prefix
 // and recovery reconstructs the full state (§6.3, §11 persistence gate).
 func TestReclamationPreservesRecoverability(t *testing.T) {
@@ -42,7 +59,7 @@ func TestReclamationPreservesRecoverability(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	seedEntries(t, w, 200)
+	seedLargeEntries(t, w, 200)
 	hs := raft.HardState{Term: 3, Vote: 2, Commit: 200}
 	if err := w.Save(raft.PersistBatch{HardState: &hs}); err != nil {
 		t.Fatal(err)

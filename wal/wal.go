@@ -251,6 +251,15 @@ func (w *WAL) nextSegment(off int64) int64 {
 	return superSize + (rel/w.opts.SegmentSize+1)*w.opts.SegmentSize
 }
 
+// segmentStart rounds off down to its segment boundary. Checkpoints must be
+// segment-aligned: compaction copies the live region to the region start,
+// and internal padding only stays consistent with the scan grid when the
+// copy preserves alignment (§6.3).
+func (w *WAL) segmentStart(off int64) int64 {
+	rel := off - superSize
+	return superSize + (rel/w.opts.SegmentSize)*w.opts.SegmentSize
+}
+
 func (w *WAL) hasValidRecordAfter(off, size int64, lastSeq uint64) bool {
 	for off < size {
 		var magic [4]byte
@@ -431,7 +440,7 @@ func (w *WAL) initSuperblock() error {
 func (w *WAL) appendRecord(typ byte, payload []byte) error {
 	recSize := headerSize + len(payload) + crcSize
 	if recSize > w.opts.MaxBatchBytes || int64(recSize) > w.opts.SegmentSize {
-		return fmt.Errorf("wal: record %d bytes exceeds budget", recSize)
+		return fmt.Errorf("wal: record type %d %d bytes exceeds budget (batch %d, segment %d)", typ, recSize, w.opts.MaxBatchBytes, w.opts.SegmentSize)
 	}
 	off := w.writeOff
 	rel := off - superSize
@@ -487,17 +496,28 @@ func (w *WAL) Save(b raft.PersistBatch) error {
 		b.HardState = &hs
 	}
 	manifest := b
+	var postManifest []raft.Entry
 	if b.Snapshot != nil {
 		// The publication must be self-contained above the snapshot index:
 		// the checkpoint discards earlier records, so the suffix entries ride
-		// in the manifest batch (§6.1, §6.4).
+		// in the manifest batch (§6.1, §6.4). A suffix too large for one batch
+		// follows as its own record before the checkpoint flips.
 		var suffix []raft.Entry
 		for _, e := range w.ents {
 			if e.Index > b.Snapshot.Index {
 				suffix = append(suffix, e)
 			}
 		}
-		manifest.Entries = append(suffix, b.Entries...)
+		suffix = append(suffix, b.Entries...)
+		sz := 0
+		for _, e := range suffix {
+			sz += 21 + len(e.Data)
+		}
+		if sz <= w.opts.MaxBatchBytes-1024 {
+			manifest.Entries = suffix
+		} else {
+			postManifest = suffix
+		}
 	}
 	stream := b.Snapshot != nil && len(b.Snapshot.Data) > w.opts.MaxBatchBytes/2
 	var streamStart int64
@@ -525,13 +545,24 @@ func (w *WAL) Save(b raft.PersistBatch) error {
 	if err := w.dev.Sync(); err != nil {
 		return err
 	}
+	if len(postManifest) > 0 {
+		if err := w.appendRecord(typeBatch, encodeBatch(raft.PersistBatch{Entries: postManifest})); err != nil {
+			return err
+		}
+		if err := w.dev.Sync(); err != nil {
+			return err
+		}
+	}
 	manifestOff := w.writeOff - int64(headerSize+len(payload)+crcSize)
 	// The checkpoint must cover the manifest's dependencies: for streamed
-	// publications the chunks precede the manifest (§6.4).
+	// publications the chunks precede the manifest (§6.4). It is rounded down
+	// to a segment boundary so compaction preserves padding alignment; the
+	// extra records replayed below the snapshot are superseded by it.
 	checkpointOff := manifestOff
 	if stream {
 		checkpointOff = streamStart
 	}
+	checkpointOff = w.segmentStart(checkpointOff)
 	if err := w.applyBatch(b); err != nil {
 		return err
 	}

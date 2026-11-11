@@ -8,6 +8,21 @@ type Progress struct {
 	RecentActive bool
 	// PendingSnapshot is the index of an in-flight snapshot, if any.
 	PendingSnapshot Index
+	// StreamOffset is the next byte offset to send for a streamed snapshot
+	// (§6.4); reset when the transfer restarts.
+	StreamOffset int
+	// StreamElapsed ticks since the last stream progress; a stalled transfer
+	// restarts after the election timeout (§6.4).
+	StreamElapsed int
+	// AppendInflight marks one unacknowledged AppendEntries per peer (§8
+	// per-peer in-flight budget): bounded pipelining, no redundant probes.
+	AppendInflight bool
+	// InflightElapsed ticks since the append was sent; a lost append is
+	// retransmitted after the election timeout.
+	InflightElapsed int
+	// ProbeElapsed ticks since the last commit probe; probes are cooldown-
+	// gated so a lagging follower is not flooded (§8).
+	ProbeElapsed int
 	// Inflight bytes/messages for resource budgets (§8), tracked by the driver.
 	InflightBytes int
 	InflightMsgs  int

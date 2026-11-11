@@ -18,6 +18,7 @@ func (c *Core) becomeFollower(term Term, leader NodeID) {
 	c.preVotes = make(map[NodeID]bool)
 	c.pendingConfTarget = nil
 	c.leaderMatch = c.log.snapshot.Index
+	c.staging = nil // an interrupted transfer never becomes a snapshot (§6.4)
 	c.resetElectionTimeout()
 	// Admitted-but-unapplied proposals become unknown on leadership loss (§7).
 	if len(c.proposals) > 0 {
@@ -289,6 +290,9 @@ func (c *Core) sendAppend(to NodeID, p *Progress) {
 	if p.PendingSnapshot > 0 {
 		return // snapshot in flight
 	}
+	if p.AppendInflight {
+		return // one append in flight per peer (§8); the ack chains the next
+	}
 	prevIndex := p.Next - 1
 	if prevIndex < c.log.snapshot.Index {
 		// Follower needs compacted history: send a snapshot (§6.4).
@@ -298,13 +302,25 @@ func (c *Core) sendAppend(to NodeID, p *Progress) {
 	prevTerm := c.log.term(prevIndex)
 	entries := c.log.entries(p.Next, c.log.lastIndex()+1)
 	// Entries beyond local durability are not yet sent under the conservative
-	// policy; the leader replicates only its durable prefix.
+	// policy; the leader replicates only its durable prefix. The batch is
+	// bounded by MaxAppendBatchBytes (§8); followers acknowledge and the
+	// remainder follows. A single entry larger than the budget still ships:
+	// admission validated command+framing against the batch limit (§8).
 	var durableEntries []Entry
+	batchBytes := 0
 	for _, e := range entries {
-		if e.Index <= c.durableIndex {
-			durableEntries = append(durableEntries, e)
+		if e.Index > c.durableIndex {
+			break
 		}
+		sz := len(e.Data) + 21
+		if len(durableEntries) > 0 && batchBytes+sz > c.cfg.MaxAppendBatchBytes {
+			break
+		}
+		durableEntries = append(durableEntries, e)
+		batchBytes += sz
 	}
+	p.AppendInflight = true
+	p.InflightElapsed = 0
 	c.out.msg(Message{
 		Type:     MsgAppend,
 		From:     c.id,
@@ -323,6 +339,14 @@ func (c *Core) sendSnapshot(to NodeID, p *Progress) {
 		return
 	}
 	p.PendingSnapshot = snap.Index
+	p.StreamElapsed = 0
+	if len(snap.Data) > c.cfg.SnapshotChunkBytes {
+		// Bounded streaming for large snapshots (§6.4): one chunk in flight,
+		// advanced by staged-byte acknowledgements.
+		p.StreamOffset = 0
+		c.sendSnapshotChunk(to, p)
+		return
+	}
 	c.out.msg(Message{
 		Type:     MsgSnapshot,
 		From:     c.id,
@@ -341,6 +365,16 @@ func (c *Core) onSnapshotInstalled(ev Event) {
 	delete(c.pending, ev.WorkID)
 	snap := pw.snapshot
 	c.installingSnapshot = nil
+	// Stale at completion: commitment/application may have advanced past the
+	// snapshot while it transferred. Ignore without regressing watermarks (§6.4).
+	if snap.Index <= c.commitIndex || snap.Index <= c.appliedIndex {
+		if c.leader != 0 {
+			c.out.msg(Message{
+				Type: MsgSnapshotResp, From: c.id, To: c.leader, Term: c.term, MatchIndex: c.appliedIndex,
+			}, 0)
+		}
+		return
+	}
 	c.log.applySnapshot(snap)
 	c.resetConfigToSnapshot(snap)
 	if snap.Index > c.durableIndex {

@@ -60,6 +60,11 @@ func EncodeMessage(m Message) []byte {
 	b = append(b, m.Snapshot.Data...)
 	b = binary.BigEndian.AppendUint32(b, uint32(len(m.ReadCtx)))
 	b = append(b, m.ReadCtx...)
+	b = putWireU64(b, m.ChunkOffset)
+	b = putWireU64(b, m.ChunkTotal)
+	b = binary.BigEndian.AppendUint32(b, m.ChunkCRC)
+	b = binary.BigEndian.AppendUint32(b, uint32(len(m.ChunkData)))
+	b = append(b, m.ChunkData...)
 	return b
 }
 
@@ -127,6 +132,11 @@ func DecodeMessage(b []byte, limit int) (Message, error) {
 	m.Snapshot.Data = append([]byte(nil), r.bytes(dl)...)
 	rl := r.u32()
 	m.ReadCtx = append([]byte(nil), r.bytes(rl)...)
+	m.ChunkOffset = r.u64()
+	m.ChunkTotal = r.u64()
+	m.ChunkCRC = r.u32()
+	cl2 := r.u32()
+	m.ChunkData = append([]byte(nil), r.bytes(cl2)...)
 	if r.err != nil {
 		return Message{}, r.err
 	}

@@ -12,6 +12,8 @@ const (
 	WorkSnapshotInstall
 	// WorkSnapshotCreate captures an FSM view.
 	WorkSnapshotCreate
+	// WorkSnapshotStage writes one streamed snapshot chunk to staging (§6.4).
+	WorkSnapshotStage
 )
 
 // PersistBatch is one atomic storage batch (§6.1). Recovery exposes either the
@@ -51,6 +53,14 @@ type Work struct {
 	Persist  PersistBatch
 	Apply    []Entry
 	Snapshot SnapshotMeta
+
+	// Snapshot streaming (§6.4): WorkSnapshotStage carries one chunk;
+	// WorkSnapshotInstall with empty Snapshot.Data and non-zero ChunkTotal
+	// resolves its payload from the staged file, verified against ChunkCRC.
+	ChunkOffset uint64
+	ChunkData   []byte
+	ChunkTotal  uint64
+	ChunkCRC    uint32
 }
 
 // OutMessage is an outbound message with an optional durability prerequisite.
@@ -100,4 +110,5 @@ type pendingWork struct {
 	hasCommit    bool
 	appliedIndex Index
 	snapshot     SnapshotMeta
+	stagedOffset uint64
 }

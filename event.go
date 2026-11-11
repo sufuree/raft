@@ -17,6 +17,8 @@ const (
 	EvSnapshotRequest
 	// EvProposeConfChange proposes a membership transition.
 	EvProposeConfChange
+	// EvSnapshotStaged completes one streamed snapshot chunk write (§6.4).
+	EvSnapshotStaged
 )
 
 // Event is one ordered input to the core.

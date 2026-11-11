@@ -22,6 +22,16 @@ type Config struct {
 	// MaxUncommittedBytes caps log bytes above the commit index (§8). Zero
 	// selects the default; admission beyond the cap returns OutcomeOverload.
 	MaxUncommittedBytes int
+	// SnapshotChunkBytes bounds one streamed snapshot chunk (§6.4). Snapshots
+	// at or below this size transfer inline. Zero selects the default.
+	SnapshotChunkBytes int
+	// MaxSnapshotBytes caps an inbound streamed snapshot (§8). Zero selects
+	// the default; larger transfers produce a typed catch-up rejection.
+	MaxSnapshotBytes int
+	// MaxAppendBatchBytes bounds the payload of one AppendEntries batch (§8).
+	// Zero selects the default. Replication continues across batches as
+	// followers acknowledge.
+	MaxAppendBatchBytes int
 	// Trace enables bounded protocol decision tracing for diagnostics.
 	Trace bool
 }
@@ -41,6 +51,15 @@ func (c *Config) validate() {
 	}
 	if c.MaxUncommittedBytes <= 0 {
 		c.MaxUncommittedBytes = 64 << 20
+	}
+	if c.SnapshotChunkBytes <= 0 {
+		c.SnapshotChunkBytes = 1 << 20
+	}
+	if c.MaxSnapshotBytes <= 0 {
+		c.MaxSnapshotBytes = 64 << 20
+	}
+	if c.MaxAppendBatchBytes <= 0 {
+		c.MaxAppendBatchBytes = 8 << 20
 	}
 }
 
@@ -145,6 +164,11 @@ type Core struct {
 
 	// Snapshot install in progress.
 	installingSnapshot *SnapshotMeta
+	// staging tracks an inbound streamed snapshot (§6.4).
+	staging *snapshotStaging
+	// snapCRC caches the end-to-end checksum of the current snapshot data.
+	snapCRCIndex Index
+	snapCRC      uint32
 
 	out Outputs
 
@@ -251,6 +275,18 @@ func (c *Core) Watermarks() (durable, commit, persistedCommit, dispatched, appli
 // Config returns the effective configuration.
 func (c *Core) Config() Configuration { return c.config.Clone() }
 
+// DebugProgress returns a snapshot of leader replication state (§8 metrics).
+func (c *Core) DebugProgress() map[NodeID]Progress {
+	out := make(map[NodeID]Progress, len(c.progress))
+	for _, id := range c.sortedProgress() {
+		out[id] = *c.progress[id]
+	}
+	return out
+}
+
+// DebugPending returns the number of outstanding work items (diagnostics).
+func (c *Core) DebugPending() int { return len(c.pending) }
+
 // DebugLog returns a copy of the accepted log entries (for diagnostics).
 func (c *Core) DebugLog() []Entry {
 	return append([]Entry(nil), c.log.ents[1:]...)
@@ -318,6 +354,8 @@ func (c *Core) Step(ev Event) Outputs {
 		c.onSnapshotCreated(ev)
 	case EvSnapshotRequest:
 		c.requestSnapshot()
+	case EvSnapshotStaged:
+		c.onSnapshotStaged(ev)
 	}
 	if c.role != Failed {
 		c.maybeDispatch()
@@ -338,6 +376,30 @@ func (c *Core) tick() {
 	if c.role == Leader {
 		c.heartbeatElapsed++
 		c.quorumElapsed++
+		// Restart stalled snapshot transfers (§6.4): a crashed or stalled
+		// receiver must not hold the pending marker forever. Active streams
+		// reset this on every acknowledged chunk.
+		for _, id := range c.sortedProgress() {
+			p := c.progress[id]
+			p.ProbeElapsed++
+			if p.AppendInflight {
+				p.InflightElapsed++
+				if p.InflightElapsed > c.cfg.ElectionTick {
+					p.AppendInflight = false // lost append: allow retransmit
+					p.InflightElapsed = 0
+				}
+			}
+			if p.PendingSnapshot > 0 {
+				p.StreamElapsed++
+				// Generous relative to elections: a live transfer can span many
+				// election timeouts; only a truly stalled receiver restarts.
+				if p.StreamElapsed > 10*c.cfg.ElectionTick {
+					p.PendingSnapshot = 0
+					p.StreamOffset = 0
+					p.StreamElapsed = 0
+				}
+			}
+		}
 		if c.heartbeatElapsed >= c.cfg.HeartbeatTick {
 			c.heartbeatElapsed = 0
 			c.broadcastHeartbeat()

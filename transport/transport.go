@@ -295,6 +295,10 @@ func (t *Transport) Send(m raft.Message) error {
 	if m.Type == raft.MsgSnapshot {
 		snap = len(m.Snapshot.Data)
 	}
+	if m.Type == raft.MsgSnapshotChunk {
+		// The receiver's snapshot cap applies to the whole transfer (§8).
+		snap = int(m.ChunkTotal)
+	}
 	if size > t.cfg.Limits.MaxFrameBytes {
 		return fmt.Errorf("%w: %d > local cap %d", ErrFrameTooLarge, size, t.cfg.Limits.MaxFrameBytes)
 	}

@@ -8,6 +8,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/crc32"
+	"io"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -59,6 +63,14 @@ type Config struct {
 	// MaxBatchBytes is the storage append-batch limit; the command plus
 	// framing must fit it (§8). It must match the storage adapter's limit.
 	MaxBatchBytes int
+	// StagingDir holds streamed snapshot staging files (§6.4). Empty selects
+	// a directory under os.TempDir. Interrupted staging never becomes a
+	// snapshot; orphans are removed at construction.
+	StagingDir string
+	// MaxSnapshotBytes caps an inbound streamed snapshot (§8).
+	MaxSnapshotBytes int
+	// SnapshotChunkBytes bounds one streamed snapshot chunk (§6.4).
+	SnapshotChunkBytes int
 }
 
 func (c *Config) setDefaults() {
@@ -88,6 +100,12 @@ func (c *Config) setDefaults() {
 	}
 	if c.MaxBatchBytes == 0 {
 		c.MaxBatchBytes = 8 << 20
+	}
+	if c.MaxSnapshotBytes == 0 {
+		c.MaxSnapshotBytes = 64 << 20
+	}
+	if c.StagingDir == "" {
+		c.StagingDir = filepath.Join(os.TempDir(), "raft-staging")
 	}
 }
 
@@ -126,9 +144,13 @@ type Driver struct {
 	failed       bool
 	stopped      bool
 
-	held  map[uint64][]raft.Message
-	sem   chan struct{}
-	state atomic.Pointer[stateSnapshot]
+	held                    map[uint64][]raft.Message
+	sem                     chan struct{}
+	state                   atomic.Pointer[stateSnapshot]
+	failMsg                 atomic.Pointer[string]
+	jobsDone                atomic.Int64 // DBG
+	lastJob                 atomic.Int64 // DBG: unix nano
+	nTick, nMsg, nEv, nComp atomic.Int64 // DBG
 }
 
 // stateSnapshot is the observable state published atomically by the event loop
@@ -163,6 +185,8 @@ func New(cfg Config, store raft.Storage, fsm FSM, tr Transport) (*Driver, error)
 	core := raft.NewCore(raft.Config{
 		ID: cfg.ID, ElectionTick: cfg.ElectionTick, HeartbeatTick: cfg.HeartbeatTick,
 		PreVote: cfg.PreVote, CheckQuorum: cfg.CheckQuorum, Seed: cfg.Seed,
+		SnapshotChunkBytes: cfg.SnapshotChunkBytes, MaxSnapshotBytes: cfg.MaxSnapshotBytes,
+		MaxAppendBatchBytes: cfg.MaxBatchBytes - raft.FramingReserve,
 	}, init)
 	d := &Driver{
 		cfg: cfg, core: core, store: store, fsm: fsm, tr: tr, epoch: epoch,
@@ -176,8 +200,23 @@ func New(cfg Config, store raft.Storage, fsm FSM, tr Transport) (*Driver, error)
 		held:      make(map[uint64][]raft.Message),
 		sem:       make(chan struct{}, cfg.MaxInflightWork),
 	}
+	// Remove orphaned staging files from prior instances (§6.4): interrupted
+	// transfers never become snapshots.
+	if matches, _ := filepath.Glob(d.stagingPattern()); matches != nil {
+		for _, m := range matches {
+			_ = os.Remove(m)
+		}
+	}
 	d.publish()
 	return d, nil
+}
+
+func (d *Driver) stagingPattern() string {
+	return filepath.Join(d.cfg.StagingDir, fmt.Sprintf("raft-snap-%d-*.staging", d.cfg.ID))
+}
+
+func (d *Driver) stagingPath(index raft.Index) string {
+	return filepath.Join(d.cfg.StagingDir, fmt.Sprintf("raft-snap-%d-%d.staging", d.cfg.ID, index))
 }
 
 // Start launches the event loop and workers.
@@ -228,30 +267,73 @@ func (d *Driver) loop() {
 		case ev := <-d.events:
 			d.step(ev)
 		case <-d.compNotify:
-			d.drainCompletions()
+			// One completion per loop iteration: completions can generate new
+			// work, and draining a whole batch here would starve network and
+			// tick processing under load (§5 control-traffic scheduling).
+			d.compMu.Lock()
+			var ev raft.Event
+			ok := false
+			if len(d.comps) > 0 {
+				ev = d.comps[0]
+				d.comps = d.comps[1:]
+				ok = true
+			}
+			more := len(d.comps) > 0
+			d.compMu.Unlock()
+			if ok {
+				d.step(ev)
+				if ev.Kind == raft.EvPersisted {
+					d.releaseHeld(ev.WorkID)
+				}
+			}
+			if more {
+				select {
+				case d.compNotify <- struct{}{}:
+				default:
+				}
+			}
 		}
 	}
 }
 
-// drainCompletions processes worker completions on the event loop (single
-// owner, §5). Workers never block posting: the queue is bounded by the number
-// of outstanding jobs, so backpressure cannot deadlock the loop.
-func (d *Driver) drainCompletions() {
-	for {
-		d.compMu.Lock()
-		evs := d.comps
-		d.comps = nil
-		d.compMu.Unlock()
-		if len(evs) == 0 {
-			return
-		}
-		for _, ev := range evs {
-			d.step(ev)
-			if ev.Kind == raft.EvPersisted {
-				d.releaseHeld(ev.WorkID)
-			}
-		}
+// stageChunk writes one streamed snapshot chunk to its staging file (§6.4).
+// Staging is transient; end-to-end integrity is verified at install.
+func (d *Driver) stageChunk(w raft.Work) error {
+	if w.ChunkTotal > uint64(d.cfg.MaxSnapshotBytes) {
+		return fmt.Errorf("driver: snapshot %d exceeds cap %d", w.ChunkTotal, d.cfg.MaxSnapshotBytes)
 	}
+	if err := os.MkdirAll(d.cfg.StagingDir, 0o700); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(d.stagingPath(w.Snapshot.Index), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if _, err := f.WriteAt(w.ChunkData, int64(w.ChunkOffset)); err != nil {
+		return err
+	}
+	return nil
+}
+
+// readStaged resolves a complete staged snapshot, bounded and verified.
+func (d *Driver) readStaged(w raft.Work) ([]byte, error) {
+	if w.ChunkTotal > uint64(d.cfg.MaxSnapshotBytes) {
+		return nil, fmt.Errorf("driver: snapshot %d exceeds cap %d", w.ChunkTotal, d.cfg.MaxSnapshotBytes)
+	}
+	f, err := os.Open(d.stagingPath(w.Snapshot.Index))
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	data := make([]byte, w.ChunkTotal)
+	if _, err := io.ReadFull(f, data); err != nil {
+		return nil, fmt.Errorf("driver: incomplete staging: %w", err)
+	}
+	if crc32.ChecksumIEEE(data) != w.ChunkCRC {
+		return nil, errors.New("driver: staged snapshot checksum mismatch")
+	}
+	return data, nil
 }
 
 // postCompletion queues a worker completion for the event loop. It never
@@ -366,6 +448,8 @@ func (d *Driver) handle(out raft.Outputs) {
 		d.mu.Lock()
 		d.failed = true
 		d.mu.Unlock()
+		reason := out.Status.Reason
+		d.failMsg.Store(&reason)
 	}
 }
 
@@ -421,18 +505,40 @@ func (d *Driver) dispatch(w raft.Work) {
 			meta := w.Snapshot
 			meta.Data = data
 			d.postCompletion(raft.Event{Kind: raft.EvSnapshotCreated, Epoch: w.Epoch, WorkID: w.ID, Snapshot: meta})
+		case raft.WorkSnapshotStage:
+			if err := d.stageChunk(w); err != nil {
+				d.postCompletion(raft.Event{Kind: raft.EvStorageFailed, Epoch: w.Epoch, WorkID: w.ID, Err: err})
+				return
+			}
+			d.postCompletion(raft.Event{Kind: raft.EvSnapshotStaged, Epoch: w.Epoch, WorkID: w.ID})
 		case raft.WorkSnapshotInstall:
-			if err := d.fsm.Restore(w.Snapshot, w.Snapshot.Data); err != nil {
+			data := w.Snapshot.Data
+			if data == nil && w.ChunkTotal > 0 {
+				// Streamed install: resolve staging with end-to-end integrity
+				// before restore (§6.4).
+				var err error
+				data, err = d.readStaged(w)
+				if err != nil {
+					d.postCompletion(raft.Event{Kind: raft.EvApplyFailed, Epoch: w.Epoch, WorkID: w.ID, Err: err})
+					return
+				}
+			}
+			meta := w.Snapshot
+			meta.Data = data
+			if err := d.fsm.Restore(meta, data); err != nil {
 				d.postCompletion(raft.Event{Kind: raft.EvApplyFailed, Epoch: w.Epoch, WorkID: w.ID, Err: err})
 				return
 			}
-			if err := d.storeSync(storeJob{save: &raft.PersistBatch{Snapshot: &w.Snapshot}}); err != nil {
+			if err := d.storeSync(storeJob{save: &raft.PersistBatch{Snapshot: &meta}}); err != nil {
 				d.postCompletion(raft.Event{Kind: raft.EvStorageFailed, Epoch: w.Epoch, WorkID: w.ID, Err: err})
 				return
 			}
 			if err := d.storeSync(storeJob{applied: w.Snapshot.Index}); err != nil {
 				d.postCompletion(raft.Event{Kind: raft.EvStorageFailed, Epoch: w.Epoch, WorkID: w.ID, Err: err})
 				return
+			}
+			if w.ChunkTotal > 0 {
+				_ = os.Remove(d.stagingPath(w.Snapshot.Index))
 			}
 			d.postCompletion(raft.Event{Kind: raft.EvSnapshotInstalled, Epoch: w.Epoch, WorkID: w.ID})
 		}
@@ -575,6 +681,18 @@ func (d *Driver) ConfChange(ctx context.Context, target raft.Configuration) (Res
 // Snapshot requests a snapshot capture through the event loop.
 func (d *Driver) Snapshot() {
 	d.post(raft.Event{Kind: raft.EvSnapshotRequest})
+}
+
+// DebugProgress reports leader replication state for diagnostics. It reads
+// core state directly: call only after Stop (single-owner rule, §5).
+func (d *Driver) DebugProgress() map[raft.NodeID]raft.Progress { return d.core.DebugProgress() }
+
+// FailReason reports why the node entered terminal Failed, or "" (§8).
+func (d *Driver) FailReason() string {
+	if p := d.failMsg.Load(); p != nil {
+		return *p
+	}
+	return ""
 }
 
 // Leader reports the known leader.

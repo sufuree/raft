@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/gob"
 	"fmt"
+	"hash/crc32"
 	"math/rand"
 	"sort"
 
@@ -64,6 +65,10 @@ type Node struct {
 
 	held    map[uint64][]raft.Message
 	durable raft.DurableState
+
+	// stage buffers an inbound streamed snapshot (§6.4).
+	stage      []byte
+	stageIndex raft.Index
 }
 
 // Network models delay, drop, duplication, reordering, and partitions.
@@ -124,6 +129,9 @@ type Simulator struct {
 	nextID  uint64
 	leaders map[raft.Term]raft.NodeID // election-safety witness
 	history []HistoryOp
+
+	chunkBytes   int
+	maxSnapBytes int
 }
 
 // HistoryOp records a client-visible operation for linearizability checking.
@@ -145,6 +153,10 @@ type Config struct {
 	PreVote       bool
 	CheckQuorum   bool
 	Voters        []raft.NodeID // initial voter set; defaults to all nodes
+	// SnapshotChunkBytes forces streamed snapshot catch-up when smaller than
+	// the snapshot (§6.4); zero selects the core default.
+	SnapshotChunkBytes int
+	MaxSnapshotBytes   int
 }
 
 // New creates a simulator with an initial configuration.
@@ -156,11 +168,13 @@ func New(cfg Config) *Simulator {
 		cfg.HeartbeatTick = 1
 	}
 	s := &Simulator{
-		Nodes:   make(map[raft.NodeID]*Node),
-		Net:     newNetwork(cfg.Seed + 1),
-		rng:     rand.New(rand.NewSource(cfg.Seed + 2)),
-		seed:    cfg.Seed,
-		leaders: make(map[raft.Term]raft.NodeID),
+		Nodes:        make(map[raft.NodeID]*Node),
+		Net:          newNetwork(cfg.Seed + 1),
+		rng:          rand.New(rand.NewSource(cfg.Seed + 2)),
+		seed:         cfg.Seed,
+		leaders:      make(map[raft.Term]raft.NodeID),
+		chunkBytes:   cfg.SnapshotChunkBytes,
+		maxSnapBytes: cfg.MaxSnapshotBytes,
 	}
 	voters := cfg.Voters
 	if voters == nil {
@@ -184,12 +198,14 @@ func New(cfg Config) *Simulator {
 		init, _ := store.Load()
 		init.Epoch = n.Epoch
 		n.Core = raft.NewCore(raft.Config{
-			ID:            id,
-			ElectionTick:  cfg.ElectionTick,
-			HeartbeatTick: cfg.HeartbeatTick,
-			PreVote:       cfg.PreVote,
-			CheckQuorum:   cfg.CheckQuorum,
-			Seed:          cfg.Seed + int64(i)*7919,
+			ID:                 id,
+			ElectionTick:       cfg.ElectionTick,
+			HeartbeatTick:      cfg.HeartbeatTick,
+			PreVote:            cfg.PreVote,
+			SnapshotChunkBytes: cfg.SnapshotChunkBytes,
+			MaxSnapshotBytes:   cfg.MaxSnapshotBytes,
+			CheckQuorum:        cfg.CheckQuorum,
+			Seed:               cfg.Seed + int64(i)*7919,
 		}, init)
 		n.durable = store.Capture()
 		s.Nodes[id] = n
@@ -265,14 +281,18 @@ func (s *Simulator) Restart(id raft.NodeID) {
 	cfg := n.Core.Config()
 	_ = cfg
 	n.Core = raft.NewCore(raft.Config{
-		ID:            id,
-		ElectionTick:  10,
-		HeartbeatTick: 1,
-		PreVote:       true,
-		CheckQuorum:   true,
-		Seed:          s.seed + int64(id)*7919 + int64(n.Epoch)*104729,
+		ID:                 id,
+		ElectionTick:       10,
+		HeartbeatTick:      1,
+		PreVote:            true,
+		CheckQuorum:        true,
+		Seed:               s.seed + int64(id)*7919 + int64(n.Epoch)*104729,
+		SnapshotChunkBytes: s.chunkBytes,
+		MaxSnapshotBytes:   s.maxSnapBytes,
 	}, init)
 	n.FSM = newFSM()
+	n.stage = nil
+	n.stageIndex = 0
 	// Reconstruct FSM from durable snapshot + committed replay.
 	s.rebuildFSM(n)
 	n.Alive = true
@@ -398,10 +418,27 @@ func (s *Simulator) applyWork(n *Node, w raft.Work) {
 		n.Store.MarkApplied(last)
 		n.durable = n.Store.Capture()
 		s.drain(n, n.Core.Step(raft.Event{Kind: raft.EvApplied, Epoch: w.Epoch, WorkID: w.ID}))
+	case raft.WorkSnapshotStage:
+		if n.stage == nil || n.stageIndex != w.Snapshot.Index {
+			n.stage = make([]byte, w.ChunkTotal)
+			n.stageIndex = w.Snapshot.Index
+		}
+		copy(n.stage[w.ChunkOffset:], w.ChunkData)
+		s.drain(n, n.Core.Step(raft.Event{Kind: raft.EvSnapshotStaged, Epoch: w.Epoch, WorkID: w.ID}))
 	case raft.WorkSnapshotInstall:
-		n.FSM.restore(w.Snapshot, w.Snapshot.Data)
-		n.Store.Save(raft.PersistBatch{Snapshot: &w.Snapshot})
-		n.Store.MarkApplied(w.Snapshot.Index)
+		meta := w.Snapshot
+		if meta.Data == nil && w.ChunkTotal > 0 {
+			if uint64(len(n.stage)) != w.ChunkTotal || crc32.ChecksumIEEE(n.stage) != w.ChunkCRC {
+				s.drain(n, n.Core.Step(raft.Event{Kind: raft.EvApplyFailed, Epoch: w.Epoch, WorkID: w.ID, Err: fmt.Errorf("sim: staged snapshot integrity failure")}))
+				return
+			}
+			meta.Data = n.stage
+			n.stage = nil
+			n.stageIndex = 0
+		}
+		n.FSM.restore(meta, meta.Data)
+		n.Store.Save(raft.PersistBatch{Snapshot: &meta})
+		n.Store.MarkApplied(meta.Index)
 		n.durable = n.Store.Capture()
 		s.drain(n, n.Core.Step(raft.Event{Kind: raft.EvSnapshotInstalled, Epoch: w.Epoch, WorkID: w.ID}))
 	case raft.WorkSnapshotCreate:

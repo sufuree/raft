@@ -47,6 +47,10 @@ func (c *Core) receive(m Message) {
 		c.handleSnapshot(m)
 	case MsgSnapshotResp:
 		c.handleSnapshotResp(m)
+	case MsgSnapshotChunk:
+		c.handleSnapshotChunk(m)
+	case MsgSnapshotChunkAck:
+		c.handleSnapshotChunkAck(m)
 	}
 }
 
@@ -148,6 +152,16 @@ func (c *Core) handleAppend(m Message) {
 	if commitHint > lastNew {
 		commitHint = lastNew
 	}
+	if len(appended) == 0 && trunc == 0 && commitHint <= c.persistedCommit {
+		// Nothing new to persist: acknowledge immediately. Re-persisting
+		// idempotent appends would amplify probe traffic into storage load.
+		c.out.msg(Message{
+			Type: MsgAppendResp, From: c.id, To: m.From, Term: c.term,
+			Reject: false, MatchIndex: lastNew,
+		}, 0)
+		c.maybeCommit()
+		return
+	}
 	if len(m.Entries) > 0 || trunc > 0 {
 		var cp *Index
 		if commitHint > c.persistedCommit {
@@ -180,6 +194,8 @@ func (c *Core) handleAppendResp(m Message) {
 	}
 	p.RecentActive = true
 	c.quorumElapsed = 0
+	p.AppendInflight = false
+	p.InflightElapsed = 0
 	if m.Reject {
 		p.Next = m.RejectHint + 1
 		if p.Next < 1 {
@@ -207,6 +223,10 @@ func (c *Core) handleHeartbeat(m Message) {
 	c.maybeCommit()
 	c.out.msg(Message{
 		Type: MsgHeartbeatResp, From: c.id, To: m.From, Term: c.term, ReadCtx: m.ReadCtx,
+		// Report the local commit so the leader can probe a follower whose
+		// commit watermark lagged a restart (MatchIndex is informational;
+		// commitment still advances only through a verified AppendEntries).
+		MatchIndex: c.commitIndex,
 	}, 0)
 }
 
@@ -217,13 +237,20 @@ func (c *Core) handleHeartbeatResp(m Message) {
 	p := c.progress[m.From]
 	if p != nil {
 		p.RecentActive = true
-		// A responsive follower may have lost an in-flight snapshot (e.g. it
-		// crashed); clear the pending marker so catch-up can retry.
-		if p.PendingSnapshot > 0 {
-			p.PendingSnapshot = 0
-		}
-		// Probe/replicate to a follower that may be behind (e.g. after restart).
+		// Probe/replicate to a follower that may be behind (e.g. after restart),
+		// or whose commit watermark lags the leader's commit (a restart can
+		// lose the last commit-watermark batch while the log survived). An
+		// in-flight snapshot transfer is NOT cleared here: heartbeat acks
+		// during an active stream would otherwise restart it forever; stalled
+		// transfers time out via StreamElapsed (§6.4).
 		if p.Match < c.log.lastIndex() {
+			c.sendAppend(m.From, p)
+		} else if m.MatchIndex < c.commitIndex && p.ProbeElapsed >= c.cfg.ElectionTick {
+			// Fully replicated but commit watermark lags (e.g. after a restart
+			// that lost the last commit batch): probe to re-verify the prefix.
+			// Cooldown-gated; the previous in-flight append may have been lost.
+			p.ProbeElapsed = 0
+			p.AppendInflight = false
 			c.sendAppend(m.From, p)
 		}
 	}
@@ -267,6 +294,7 @@ func (c *Core) handleSnapshotResp(m Message) {
 	}
 	p.Next = p.Match + 1
 	p.PendingSnapshot = 0
+	p.StreamOffset = 0
 	c.maybeCommit()
 	if p.Next <= c.log.lastIndex() {
 		c.sendAppend(m.From, p)

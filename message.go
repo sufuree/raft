@@ -14,6 +14,11 @@ const (
 	MsgHeartbeatResp
 	MsgSnapshot
 	MsgSnapshotResp
+	// MsgSnapshotChunk streams a large snapshot in bounded pieces (§6.4).
+	MsgSnapshotChunk
+	// MsgSnapshotChunkAck acknowledges staged bytes (MatchIndex carries the
+	// staged byte offset, not a log index).
+	MsgSnapshotChunkAck
 )
 
 func (t MessageType) String() string {
@@ -38,6 +43,10 @@ func (t MessageType) String() string {
 		return "Snapshot"
 	case MsgSnapshotResp:
 		return "SnapshotResp"
+	case MsgSnapshotChunk:
+		return "SnapshotChunk"
+	case MsgSnapshotChunkAck:
+		return "SnapshotChunkAck"
 	}
 	return "Unknown"
 }
@@ -71,6 +80,14 @@ type Message struct {
 
 	// ReadCtx carries a unique read-barrier confirmation context (§4.3).
 	ReadCtx []byte
+
+	// Snapshot streaming (§6.4): ChunkData carries bytes [ChunkOffset,
+	// ChunkOffset+len) of a snapshot whose total size is ChunkTotal and
+	// end-to-end checksum is ChunkCRC. Snapshot carries the metadata only.
+	ChunkOffset uint64
+	ChunkTotal  uint64
+	ChunkCRC    uint32
+	ChunkData   []byte
 }
 
 // Clone deep-copies a message so payload ownership is explicit (§5).
@@ -86,5 +103,6 @@ func (m Message) Clone() Message {
 	out.ReadCtx = append([]byte(nil), m.ReadCtx...)
 	out.Snapshot.Config = m.Snapshot.Config.Clone()
 	out.Snapshot.Data = append([]byte(nil), m.Snapshot.Data...)
+	out.ChunkData = append([]byte(nil), m.ChunkData...)
 	return out
 }
