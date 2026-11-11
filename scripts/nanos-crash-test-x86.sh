@@ -11,8 +11,7 @@ common_args() {
   echo "-machine q35 -accel kvm -cpu host \
     -m 512M -smp 1 -kernel $KERNEL \
     -device virtio-rng-pci \
-    -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
-    -no-reboot -display none -monitor none -device isa-debug-exit"
+      -no-reboot -display none -monitor none -device isa-debug-exit"
 }
 
 $QEMU $(common_args) \

@@ -17,8 +17,7 @@ common_args() {
   echo "-machine virt -machine gic-version=2 -cpu $CPU -accel $ACCEL \
     -m 512M -smp 1 -kernel $KERNEL \
     -semihosting -device virtio-rng-pci \
-    -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
-    -no-reboot -display none -monitor none"
+      -no-reboot -display none -monitor none"
 }
 
 # Phase 1: write durable + unsynced state, then hang.

@@ -37,14 +37,14 @@ if [ "$GOARCH" = "arm64" ]; then
     -kernel "$KERNEL" \
     -drive file=/root/nanos/image-full,format=raw,if=none,id=hd0 -device virtio-blk-pci,drive=hd0 \
     -drive file="$VOL",format=raw,if=none,id=hd1 -device virtio-blk-pci,drive=hd1 \
-    -semihosting -device virtio-rng-pci -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
+    -semihosting -device virtio-rng-pci \
     -nographic -no-reboot > /root/nanos/tcg-full.log 2>&1
 else
   timeout 300 $QEMU -machine q35 -accel tcg -cpu qemu64 -m 512M -smp 1 \
     -kernel "$KERNEL" -device virtio-scsi-pci,id=scsi0 \
     -drive file=/root/nanos/image-full,format=raw,if=none,id=hd0 -device scsi-hd,bus=scsi0.0,drive=hd0 \
     -drive file="$VOL",format=raw,if=none,id=hd1 -device scsi-hd,bus=scsi0.0,drive=hd1 \
-    -device virtio-rng-pci -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
+    -device virtio-rng-pci \
     -nographic -no-reboot -device isa-debug-exit > /root/nanos/tcg-full.log 2>&1
 fi
 cat /root/nanos/tcg-full.log
@@ -60,9 +60,13 @@ fi
 # Comparative benchmarks (Linux reference platform).
 cd /root/raft/bench/compare
 go mod download || exit 1
+# EBS-backed directory (/tmp is tmpfs on AL2023 — not a durable substrate).
 for p in P1 P2 P7; do
-  go run . -profile $p -impl all 2>/dev/null > /root/nanos/bench-$p.json
+  rm -rf /root/bench-$p
+  mkdir -p /root/bench-$p
+  go run . -profile $p -impl all -dir /root/bench-$p 2>/root/nanos/bench-$p.err > /root/nanos/bench-$p.json
   cat /root/nanos/bench-$p.json
+  tail -3 /root/nanos/bench-$p.err
 done
 
 {
@@ -76,7 +80,7 @@ done
 } > /root/nanos/pins.txt
 cat /root/nanos/pins.txt
 aws s3 cp /tmp/tcg-bench.log s3://raft-qual-1794435910-27473/tcg-bench.log
-for f in tcg-full.log pins.txt bench-P1.json bench-P2.json bench-P7.json; do
+for f in tcg-full.log pins.txt bench-P1.json bench-P2.json bench-P7.json bench-P1.err bench-P2.err bench-P7.err; do
   aws s3 cp /root/nanos/$f s3://raft-qual-1794435910-27473/$f
 done
 echo "TCG-BENCH COMPLETE"

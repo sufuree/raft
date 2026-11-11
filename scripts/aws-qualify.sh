@@ -80,7 +80,7 @@ if [ "$GOARCH" = "arm64" ]; then
     -kernel "$KERNEL" \
     -drive file=/root/nanos/image-full,format=raw,if=none,id=hd0 -device virtio-blk-pci,drive=hd0 \
     -drive file="$VOL",format=raw,if=none,id=hd1 -device virtio-blk-pci,drive=hd1 \
-    -semihosting -device virtio-rng-pci -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
+    -semihosting -device virtio-rng-pci \
     -nographic -no-reboot > /root/nanos/kvm-full.log 2>&1
 else
   timeout 180 qemu-system-x86_64 -machine q35 -accel kvm -cpu host -m 512M -smp 1 \
@@ -88,7 +88,7 @@ else
     -device virtio-scsi-pci,id=scsi0 \
     -drive file=/root/nanos/image-full,format=raw,if=none,id=hd0 -device scsi-hd,bus=scsi0.0,drive=hd0 \
     -drive file="$VOL",format=raw,if=none,id=hd1 -device scsi-hd,bus=scsi0.0,drive=hd1 \
-    -device virtio-rng-pci -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
+    -device virtio-rng-pci \
     -nographic -no-reboot -device isa-debug-exit > /root/nanos/kvm-full.log 2>&1
 fi
 cat /root/nanos/kvm-full.log
