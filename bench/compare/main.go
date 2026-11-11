@@ -56,19 +56,23 @@ func main() {
 	}
 	var results []result
 	for _, name := range impls {
+		var r result
+		if *profile == "P7" {
+			// runRestart manages its own node lifecycle (seed, shutdown, reopen).
+			r = runRestart(name, *dir)
+			results = append(results, r)
+			continue
+		}
 		n, err := newNode(name, *dir)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%s: setup: %v\n", name, err)
 			os.Exit(1)
 		}
-		var r result
 		switch *profile {
 		case "P1":
 			r = runSteady(name, n, 500, 10*time.Second)
 		case "P2":
 			r = runBurst(name, n, 1000)
-		case "P7":
-			r = runRestart(name, *dir)
 		default:
 			fmt.Fprintf(os.Stderr, "unknown profile %s\n", *profile)
 			os.Exit(1)

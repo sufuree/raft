@@ -9,8 +9,8 @@ import (
 
 	raft "github.com/sufuree/raft"
 	"github.com/sufuree/raft/wal"
-	pb "go.etcd.io/raft/v3/raftpb"
 	etcdraft "go.etcd.io/raft/v3"
+	pb "go.etcd.io/raft/v3/raftpb"
 	"google.golang.org/protobuf/proto"
 )
 

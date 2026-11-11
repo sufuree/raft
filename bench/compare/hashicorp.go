@@ -12,8 +12,9 @@ import (
 )
 
 type hcNode struct {
-	r   *hraft.Raft
-	dir string
+	r     *hraft.Raft
+	store *raftboltdb.BoltStore
+	dir   string
 }
 
 type hcFSM struct{ applied uint64 }
@@ -30,7 +31,7 @@ func (f *hcFSM) Restore(rc io.ReadCloser) error       { return rc.Close() }
 type hcSnap struct{}
 
 func (s *hcSnap) Persist(sink hraft.SnapshotSink) error { return sink.Close() }
-func (s *hcSnap) Release()                            {}
+func (s *hcSnap) Release()                              {}
 
 func newHashicorp(dir string) (*hcNode, error) {
 	hdir := filepath.Join(dir, "hc")
@@ -56,16 +57,22 @@ func newHashicorp(dir string) (*hcNode, error) {
 	if err != nil {
 		return nil, err
 	}
-	f := r.BootstrapCluster(hraft.Configuration{
-		Servers: []hraft.Server{{ID: "1", Address: "1", Suffrage: hraft.Voter}},
-	})
-	if err := f.Error(); err != nil {
+	hasState, err := hraft.HasExistingState(store, store, snapStore)
+	if err != nil {
 		return nil, err
+	}
+	if !hasState {
+		f := r.BootstrapCluster(hraft.Configuration{
+			Servers: []hraft.Server{{ID: "1", Address: "1", Suffrage: hraft.Voter}},
+		})
+		if err := f.Error(); err != nil {
+			return nil, err
+		}
 	}
 	if err := waitLeader(func() bool { return r.State() == hraft.Leader }); err != nil {
 		return nil, err
 	}
-	return &hcNode{r: r, dir: hdir}, nil
+	return &hcNode{r: r, store: store, dir: hdir}, nil
 }
 
 func (n *hcNode) propose(data []byte) error {
@@ -85,6 +92,7 @@ func (n *hcNode) barrier() error {
 
 func (n *hcNode) shutdown() {
 	n.r.Shutdown().Error()
+	n.store.Close()
 }
 
 var _ = fmt.Sprintf

@@ -30,7 +30,7 @@ func (f *compareFSM) Apply(es []raft.Entry) error {
 	}
 	return nil
 }
-func (f *compareFSM) Snapshot() ([]byte, error)                  { return []byte("snap"), nil }
+func (f *compareFSM) Snapshot() ([]byte, error)                   { return []byte("snap"), nil }
 func (f *compareFSM) Restore(s raft.SnapshotMeta, d []byte) error { f.applied = s.Index; return nil }
 
 func newOurs(dir string) (*oursNode, error) {
