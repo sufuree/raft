@@ -3,6 +3,7 @@ package raft
 import (
 	"errors"
 	"fmt"
+	"sync"
 )
 
 // ErrCompacted is returned when requested history has been reclaimed.
@@ -35,6 +36,7 @@ type Storage interface {
 // atomic. It is not crash-safe by itself; the simulator models crash/recovery
 // by reverting to the last completed Save.
 type MemStorage struct {
+	mu            sync.Mutex
 	hs            HardState
 	snap          SnapshotMeta
 	ents          []Entry // contiguous entries after snap
@@ -49,10 +51,18 @@ func NewMemStorage() *MemStorage { return &MemStorage{} }
 
 // SetInitialConfig records the bootstrap configuration durably so it survives
 // restart before any configuration entry exists.
-func (m *MemStorage) SetInitialConfig(c Configuration) { m.initialConfig = c.Clone() }
+func (m *MemStorage) SetInitialConfig(c Configuration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.initialConfig = c.Clone()
+}
 
 // FailNext injects a failure into the next Save (for failure-path tests).
-func (m *MemStorage) FailNext(err error) { m.failNext = err }
+func (m *MemStorage) FailNext(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.failNext = err
+}
 
 func (m *MemStorage) lastIndex() Index {
 	if len(m.ents) > 0 {
@@ -63,6 +73,8 @@ func (m *MemStorage) lastIndex() Index {
 
 // Load implements Storage.
 func (m *MemStorage) Load() (InitState, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	cfg := m.snap.Config.Clone()
 	if len(cfg.Voters) == 0 {
 		cfg = m.initialConfig.Clone()
@@ -79,6 +91,8 @@ func (m *MemStorage) Load() (InitState, error) {
 
 // Save implements Storage atomically.
 func (m *MemStorage) Save(b PersistBatch) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.closed {
 		return errors.New("raft: storage closed")
 	}
@@ -145,6 +159,8 @@ func (m *MemStorage) appendEntry(e Entry) {
 
 // ReadEntries implements Storage.
 func (m *MemStorage) ReadEntries(lo, hi Index) ([]Entry, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if lo <= m.snap.Index {
 		return nil, ErrCompacted
 	}
@@ -164,10 +180,16 @@ func (m *MemStorage) ReadEntries(lo, hi Index) ([]Entry, error) {
 }
 
 // ReadSnapshot implements Storage.
-func (m *MemStorage) ReadSnapshot() (SnapshotMeta, error) { return m.snap, nil }
+func (m *MemStorage) ReadSnapshot() (SnapshotMeta, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.snap, nil
+}
 
 // MarkApplied implements Storage.
 func (m *MemStorage) MarkApplied(idx Index) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if idx > m.applied {
 		m.applied = idx
 	}
@@ -175,7 +197,12 @@ func (m *MemStorage) MarkApplied(idx Index) error {
 }
 
 // Close implements Storage.
-func (m *MemStorage) Close() error { m.closed = true; return nil }
+func (m *MemStorage) Close() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.closed = true
+	return nil
+}
 
 // DurableState captures the durable state for crash simulation.
 type DurableState struct {
@@ -188,6 +215,8 @@ type DurableState struct {
 
 // Capture returns a copy of the current durable state.
 func (m *MemStorage) Capture() DurableState {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return DurableState{
 		hs:            m.hs,
 		snap:          m.snap,
@@ -199,6 +228,8 @@ func (m *MemStorage) Capture() DurableState {
 
 // Restore reverts storage to a captured durable state (crash model).
 func (m *MemStorage) Restore(s DurableState) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.hs = s.hs
 	m.snap = s.snap
 	m.ents = append([]Entry(nil), s.ents...)

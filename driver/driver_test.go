@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/gob"
+	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -204,5 +206,72 @@ func TestProposalTooLarge(t *testing.T) {
 	big := make([]byte, nodes[0].d.cfg.MaxCommandBytes+1)
 	if _, err := nodes[0].d.Propose(ctx, big); err != ErrTooLarge {
 		t.Fatalf("expected ErrTooLarge, got %v", err)
+	}
+}
+
+// orderStorage detects concurrent or out-of-order persistence (§5: one
+// ordered batch in flight per node).
+type orderStorage struct {
+	*raft.MemStorage
+	busy     atomic.Int32
+	violated atomic.Bool
+	saves    atomic.Int64
+}
+
+func (s *orderStorage) Save(b raft.PersistBatch) error {
+	if s.busy.Add(1) != 1 {
+		s.violated.Store(true)
+	}
+	s.saves.Add(1)
+	err := s.MemStorage.Save(b)
+	s.busy.Add(-1)
+	return err
+}
+
+func (s *orderStorage) MarkApplied(idx raft.Index) error {
+	if s.busy.Add(1) != 1 {
+		s.violated.Store(true)
+	}
+	err := s.MemStorage.MarkApplied(idx)
+	s.busy.Add(-1)
+	return err
+}
+
+// TestOrderedPersistence verifies storage operations never overlap, even
+// under a proposal burst with concurrent apply workers.
+func TestOrderedPersistence(t *testing.T) {
+	// A single-node driver under a proposal burst maximizes overlap between
+	// persistence and apply work; storage operations must never overlap.
+	store := &orderStorage{MemStorage: raft.NewMemStorage()}
+	store.SetInitialConfig(raft.Configuration{Voters: raft.NodeSet{1}})
+	d, err := New(Config{ID: 1, ElectionTick: 5, HeartbeatTick: 1, TickInterval: time.Millisecond},
+		store, newTestFSM(), NewLoopNetwork().NewTransport(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Start()
+	defer d.Stop()
+	deadline := time.Now().Add(5 * time.Second)
+	for !d.IsLeader() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var wg sync.WaitGroup
+	for i := 0; i < 200; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if _, err := d.Propose(ctx, []byte(fmt.Sprintf("burst-%d", i))); err != nil {
+				t.Errorf("propose %d: %v", i, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	if store.violated.Load() {
+		t.Fatal("concurrent storage operations detected; persistence must be ordered (§5)")
+	}
+	if store.saves.Load() < 200 {
+		t.Fatalf("expected >=200 saves, got %d", store.saves.Load())
 	}
 }

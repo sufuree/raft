@@ -95,9 +95,14 @@ type Driver struct {
 	tr    Transport
 	epoch uint64
 
-	events chan raft.Event
-	stop   chan struct{}
-	done   chan struct{}
+	events     chan raft.Event
+	storeCh    chan storeJob
+	compMu     sync.Mutex
+	comps      []raft.Event
+	compNotify chan struct{}
+	stop       chan struct{}
+	done       chan struct{}
+	storeDone  chan struct{}
 
 	mu           sync.Mutex
 	started      bool
@@ -142,12 +147,15 @@ func New(cfg Config, store raft.Storage, fsm FSM, tr Transport) (*Driver, error)
 	}, init)
 	d := &Driver{
 		cfg: cfg, core: core, store: store, fsm: fsm, tr: tr, epoch: epoch,
-		events: make(chan raft.Event, 1024),
-		stop:   make(chan struct{}), done: make(chan struct{}),
-		propWait: make(map[uint64]chan Result),
-		readWait: make(map[string]chan raft.ReadResult),
-		held:     make(map[uint64][]raft.Message),
-		sem:      make(chan struct{}, cfg.MaxInflightWork),
+		events:     make(chan raft.Event, 1024),
+		storeCh:    make(chan storeJob, cfg.MaxInflightWork),
+		compNotify: make(chan struct{}, 1),
+		stop:       make(chan struct{}), done: make(chan struct{}),
+		storeDone: make(chan struct{}),
+		propWait:  make(map[uint64]chan Result),
+		readWait:  make(map[string]chan raft.ReadResult),
+		held:      make(map[uint64][]raft.Message),
+		sem:       make(chan struct{}, cfg.MaxInflightWork),
 	}
 	d.publish()
 	return d, nil
@@ -162,6 +170,7 @@ func (d *Driver) Start() {
 	}
 	d.started = true
 	d.mu.Unlock()
+	go d.storeLoop()
 	go d.loop()
 }
 
@@ -179,6 +188,7 @@ func (d *Driver) Stop() error {
 	d.mu.Unlock()
 	if started {
 		<-d.done
+		<-d.storeDone
 	}
 	return d.tr.Close()
 }
@@ -198,10 +208,94 @@ func (d *Driver) loop() {
 			d.step(raft.Event{Kind: raft.EvReceive, Message: m})
 		case ev := <-d.events:
 			d.step(ev)
+		case <-d.compNotify:
+			d.drainCompletions()
+		}
+	}
+}
+
+// drainCompletions processes worker completions on the event loop (single
+// owner, §5). Workers never block posting: the queue is bounded by the number
+// of outstanding jobs, so backpressure cannot deadlock the loop.
+func (d *Driver) drainCompletions() {
+	for {
+		d.compMu.Lock()
+		evs := d.comps
+		d.comps = nil
+		d.compMu.Unlock()
+		if len(evs) == 0 {
+			return
+		}
+		for _, ev := range evs {
+			d.step(ev)
 			if ev.Kind == raft.EvPersisted {
 				d.releaseHeld(ev.WorkID)
 			}
 		}
+	}
+}
+
+// postCompletion queues a worker completion for the event loop. It never
+// blocks the caller.
+func (d *Driver) postCompletion(ev raft.Event) {
+	d.compMu.Lock()
+	d.comps = append(d.comps, ev)
+	d.compMu.Unlock()
+	select {
+	case d.compNotify <- struct{}{}:
+	default:
+	}
+}
+
+// storeJob is one ordered storage operation. All Save and MarkApplied calls
+// go through storeLoop: one ordered persistence batch in flight per node
+// (§5), so batches apply in work order and storage has a single accessor.
+type storeJob struct {
+	save    *raft.PersistBatch
+	applied raft.Index
+	reply   chan error // synchronous caller (apply/install workers)
+	work    raft.Work  // asynchronous persist completion
+}
+
+func (d *Driver) storeLoop() {
+	defer close(d.storeDone)
+	for {
+		select {
+		case <-d.stop:
+			return
+		case j := <-d.storeCh:
+			var err error
+			if j.save != nil {
+				err = d.store.Save(*j.save)
+			} else {
+				err = d.store.MarkApplied(j.applied)
+			}
+			if j.reply != nil {
+				j.reply <- err
+				continue
+			}
+			if err != nil {
+				d.postCompletion(raft.Event{Kind: raft.EvStorageFailed, Epoch: j.work.Epoch, WorkID: j.work.ID, Err: err})
+			} else {
+				d.postCompletion(raft.Event{Kind: raft.EvPersisted, Epoch: j.work.Epoch, WorkID: j.work.ID})
+			}
+		}
+	}
+}
+
+// storeSync runs one storage operation in order and waits for its receipt.
+func (d *Driver) storeSync(j storeJob) error {
+	j.reply = make(chan error, 1)
+	select {
+	case d.storeCh <- j:
+	case <-d.stop:
+		return ErrStopped
+	}
+	select {
+	case err := <-j.reply:
+		return err
+	case <-d.stop:
+		return ErrStopped
 	}
 }
 
@@ -264,51 +358,64 @@ func (d *Driver) releaseHeld(workID uint64) {
 }
 
 func (d *Driver) dispatch(w raft.Work) {
-	// Bounded workers: acquiring blocks the event loop when saturated, providing
-	// backpressure rather than unbounded goroutine/memory growth (§5, §8).
-	d.sem <- struct{}{}
+	// Persistence is serialized in work order through storeLoop (§5): one
+	// ordered batch in flight per node. A full queue applies backpressure to
+	// the event loop rather than unbounded growth (§8).
+	if w.Kind == raft.WorkPersist {
+		select {
+		case d.storeCh <- storeJob{save: &w.Persist, work: w}:
+		case <-d.stop:
+		}
+		return
+	}
+	// Bounded apply/snapshot workers: acquiring blocks the event loop when
+	// saturated, providing backpressure rather than unbounded goroutines.
+	select {
+	case d.sem <- struct{}{}:
+	case <-d.stop:
+		return
+	}
 	go func() {
 		defer func() { <-d.sem }()
 		switch w.Kind {
-		case raft.WorkPersist:
-			err := d.store.Save(w.Persist)
-			if err != nil {
-				d.post(raft.Event{Kind: raft.EvStorageFailed, Epoch: w.Epoch, WorkID: w.ID, Err: err})
-				return
-			}
-			d.post(raft.Event{Kind: raft.EvPersisted, Epoch: w.Epoch, WorkID: w.ID})
 		case raft.WorkApply:
-			err := d.fsm.Apply(w.Apply)
-			if err != nil {
-				d.post(raft.Event{Kind: raft.EvApplyFailed, Epoch: w.Epoch, WorkID: w.ID, Err: err})
+			if err := d.fsm.Apply(w.Apply); err != nil {
+				d.postCompletion(raft.Event{Kind: raft.EvApplyFailed, Epoch: w.Epoch, WorkID: w.ID, Err: err})
 				return
 			}
 			var last raft.Index
 			if len(w.Apply) > 0 {
 				last = w.Apply[len(w.Apply)-1].Index
 			}
-			_ = d.store.MarkApplied(last)
-			d.post(raft.Event{Kind: raft.EvApplied, Epoch: w.Epoch, WorkID: w.ID})
+			// A failed applied-watermark write is a failed durable write (§6.2).
+			if err := d.storeSync(storeJob{applied: last}); err != nil {
+				d.postCompletion(raft.Event{Kind: raft.EvStorageFailed, Epoch: w.Epoch, WorkID: w.ID, Err: err})
+				return
+			}
+			d.postCompletion(raft.Event{Kind: raft.EvApplied, Epoch: w.Epoch, WorkID: w.ID})
 		case raft.WorkSnapshotCreate:
 			data, err := d.fsm.Snapshot()
 			if err != nil {
-				d.post(raft.Event{Kind: raft.EvApplyFailed, Epoch: w.Epoch, WorkID: w.ID, Err: err})
+				d.postCompletion(raft.Event{Kind: raft.EvApplyFailed, Epoch: w.Epoch, WorkID: w.ID, Err: err})
 				return
 			}
 			meta := w.Snapshot
 			meta.Data = data
-			d.post(raft.Event{Kind: raft.EvSnapshotCreated, Epoch: w.Epoch, WorkID: w.ID, Snapshot: meta})
+			d.postCompletion(raft.Event{Kind: raft.EvSnapshotCreated, Epoch: w.Epoch, WorkID: w.ID, Snapshot: meta})
 		case raft.WorkSnapshotInstall:
 			if err := d.fsm.Restore(w.Snapshot, w.Snapshot.Data); err != nil {
-				d.post(raft.Event{Kind: raft.EvApplyFailed, Epoch: w.Epoch, WorkID: w.ID, Err: err})
+				d.postCompletion(raft.Event{Kind: raft.EvApplyFailed, Epoch: w.Epoch, WorkID: w.ID, Err: err})
 				return
 			}
-			if err := d.store.Save(raft.PersistBatch{Snapshot: &w.Snapshot}); err != nil {
-				d.post(raft.Event{Kind: raft.EvStorageFailed, Epoch: w.Epoch, WorkID: w.ID, Err: err})
+			if err := d.storeSync(storeJob{save: &raft.PersistBatch{Snapshot: &w.Snapshot}}); err != nil {
+				d.postCompletion(raft.Event{Kind: raft.EvStorageFailed, Epoch: w.Epoch, WorkID: w.ID, Err: err})
 				return
 			}
-			_ = d.store.MarkApplied(w.Snapshot.Index)
-			d.post(raft.Event{Kind: raft.EvSnapshotInstalled, Epoch: w.Epoch, WorkID: w.ID})
+			if err := d.storeSync(storeJob{applied: w.Snapshot.Index}); err != nil {
+				d.postCompletion(raft.Event{Kind: raft.EvStorageFailed, Epoch: w.Epoch, WorkID: w.ID, Err: err})
+				return
+			}
+			d.postCompletion(raft.Event{Kind: raft.EvSnapshotInstalled, Epoch: w.Epoch, WorkID: w.ID})
 		}
 	}()
 }
