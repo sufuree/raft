@@ -3,6 +3,7 @@ package driver_test
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	raft "github.com/sufuree/raft"
@@ -13,12 +14,18 @@ import (
 // kvFSM is a minimal deterministic state machine. Applications own their
 // command schema, deduplication, and any external effects; the library only
 // orders committed commands (RFC §10).
+// kvFSM is synchronized: Apply runs on the driver's worker, and readers must
+// hold the same lock. The read barrier guarantees the applied index, not
+// memory visibility of the FSM's fields (RFC §7 synchronized view).
 type kvFSM struct {
+	mu      sync.Mutex
 	applied raft.Index
 	values  map[string]string
 }
 
 func (f *kvFSM) Apply(entries []raft.Entry) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	for _, e := range entries {
 		if e.Type == raft.EntryNormal && len(e.Data) > 0 {
 			f.values[string(e.Data)] = "set"
@@ -28,6 +35,12 @@ func (f *kvFSM) Apply(entries []raft.Entry) error {
 		}
 	}
 	return nil
+}
+
+func (f *kvFSM) get(key string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.values[key]
 }
 
 func (f *kvFSM) Snapshot() ([]byte, error) { return nil, nil }
@@ -84,7 +97,7 @@ func Example() {
 	if _, err := d.Read(ctx); err != nil {
 		panic(err)
 	}
-	fmt.Println("applied:", fsm.values["greeting"])
+	fmt.Println("applied:", fsm.get("greeting"))
 	// Output:
 	// outcome: true
 	// applied: set
