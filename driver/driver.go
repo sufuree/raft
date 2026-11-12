@@ -156,13 +156,10 @@ type Driver struct {
 	failed       bool
 	stopped      bool
 
-	held                    map[uint64][]raft.Message
-	sem                     chan struct{}
-	state                   atomic.Pointer[stateSnapshot]
-	failMsg                 atomic.Pointer[string]
-	jobsDone                atomic.Int64 // DBG
-	lastJob                 atomic.Int64 // DBG: unix nano
-	nTick, nMsg, nEv, nComp atomic.Int64 // DBG
+	held    map[uint64][]raft.Message
+	sem     chan struct{}
+	state   atomic.Pointer[stateSnapshot]
+	failMsg atomic.Pointer[string]
 }
 
 // stateSnapshot is the observable state published atomically by the event loop

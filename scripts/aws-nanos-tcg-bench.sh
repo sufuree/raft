@@ -2,6 +2,7 @@
 # Nanos QEMU/TCG qualification on Linux (KVM-pending fallback receipt) plus
 # comparative benchmarks on the Linux reference platform.
 set -x
+BUCKET="${BUCKET:?BUCKET env required (temporary S3 transfer bucket)}"
 export HOME=/root
 export GOCACHE=/root/.cache/go-build GOPATH=/root/go
 export PATH=$PATH:/usr/local/go/bin:/usr/local/bin
@@ -79,8 +80,8 @@ done
   nproc; free -m
 } > /root/nanos/pins.txt
 cat /root/nanos/pins.txt
-aws s3 cp /tmp/tcg-bench.log s3://raft-qual-1794435910-27473/tcg-bench.log
+aws s3 cp /tmp/tcg-bench.log s3://${BUCKET}/tcg-bench.log
 for f in tcg-full.log pins.txt bench-P1.json bench-P2.json bench-P7.json bench-P1.err bench-P2.err bench-P7.err; do
-  aws s3 cp /root/nanos/$f s3://raft-qual-1794435910-27473/$f
+  aws s3 cp /root/nanos/$f s3://${BUCKET}/$f
 done
 echo "TCG-BENCH COMPLETE"

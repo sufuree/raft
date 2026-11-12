@@ -3,3 +3,27 @@
 *.out
 coverage.*
 /bin/
+
+# Compiled binaries (build with go build -o; do not commit)
+/qualify
+/compare
+/bboltprobe
+bench/compare/compare
+bench/compare/bboltprobe/bboltprobe
+
+# Local storage / benchmark data (never commit durable state)
+*.wal
+*.raw
+*.img
+/data/
+/bench-out/
+
+# Nanos/ops local images and volumes
+.ops/
+
+# Fuzz crashers (the seed corpus under testdata/fuzz is committed)
+testdata/fuzz/**/crashers/
+
+# OS / editor
+.DS_Store
+*.swp

@@ -3,6 +3,7 @@
 # with a timeout so a stuck baseline cell cannot block the rest. EBS-backed
 # directories (/tmp is tmpfs on AL2023).
 set -x
+BUCKET="${BUCKET:?BUCKET env required (temporary S3 transfer bucket)}"
 export HOME=/root GOCACHE=/root/.cache/go-build GOPATH=/root/go
 export PATH=$PATH:/usr/local/go/bin
 exec > /tmp/bench-matrix.log 2>&1
@@ -18,6 +19,6 @@ for p in P1 P2 P7; do
   done
 done
 for f in /root/bench-*.json /root/bench-*.err; do
-  aws s3 cp "$f" s3://raft-qual-1794435910-27473/$(basename $f)
+  aws s3 cp "$f" s3://${BUCKET}/$(basename $f)
 done
 echo "BENCH-MATRIX COMPLETE"

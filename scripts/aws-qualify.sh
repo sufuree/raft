@@ -2,6 +2,7 @@
 # Full qualification on the AWS Linux instance: reference-platform tests,
 # native qualify, Nanos QEMU/KVM qualification (both substrates + power loss).
 set -x
+BUCKET="${BUCKET:?BUCKET env required (temporary S3 transfer bucket)}"
 export HOME=/root
 export GOCACHE=/root/.cache/go-build GOPATH=/root/go
 export PATH=$PATH:/usr/local/go/bin:/root/.ops/bin
@@ -22,7 +23,7 @@ ops version || true
 
 rm -rf /root/raft
 mkdir -p /root/raft && cd /root/raft
-aws s3 cp s3://raft-qual-1794435910-27473/raft-src.tar.gz . || exit 1
+aws s3 cp s3://${BUCKET}/raft-src.tar.gz . || exit 1
 tar xzf raft-src.tar.gz
 gofmt -l . ; go vet ./... && go build ./... || exit 1
 go test ./... -count=1 -timeout 300s || exit 1
@@ -115,7 +116,7 @@ fi
 } > /root/nanos/pins.txt
 cat /root/nanos/pins.txt
 
-aws s3 cp /tmp/qual-results.log s3://raft-qual-1794435910-27473/qual-results.log
-aws s3 cp /root/nanos/kvm-full.log s3://raft-qual-1794435910-27473/kvm-full.log
-aws s3 cp /root/nanos/pins.txt s3://raft-qual-1794435910-27473/pins.txt
+aws s3 cp /tmp/qual-results.log s3://${BUCKET}/qual-results.log
+aws s3 cp /root/nanos/kvm-full.log s3://${BUCKET}/kvm-full.log
+aws s3 cp /root/nanos/pins.txt s3://${BUCKET}/pins.txt
 echo "AWS-QUALIFY COMPLETE"
