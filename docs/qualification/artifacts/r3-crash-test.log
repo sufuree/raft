@@ -1,0 +1,6 @@
+CRASHTEST power-loss injected
+cat: /tmp/tmp.VOrXBYKzHC/qemu2.pid: No such file or directory
+QUAL start mode=crashverify go=go1.27.4 arch=linux/arm64 gomaxprocs=1 dir=/data
+QUAL crashverify PASS durable prefix survived power loss; unsynced tail discarded
+QUAL DONE
+CRASHTEST PASS

@@ -1,0 +1,186 @@
+2026-11-12T05:53:12.803Z [INFO]  raft: initial configuration: index=0 servers=[]
+2026-11-12T05:53:12.803Z [INFO]  raft: entering follower state: follower="Node at n1 [Follower]" leader-address= leader-id=
+2026-11-12T05:53:12.806Z [INFO]  raft: initial configuration: index=0 servers=[]
+2026-11-12T05:53:12.806Z [INFO]  raft: entering follower state: follower="Node at n2 [Follower]" leader-address= leader-id=
+2026-11-12T05:53:12.809Z [INFO]  raft: initial configuration: index=0 servers=[]
+2026-11-12T05:53:12.809Z [INFO]  raft: entering follower state: follower="Node at n3 [Follower]" leader-address= leader-id=
+2026-11-12T05:53:12.862Z [WARN]  raft: heartbeat timeout reached, starting election: last-leader-addr= last-leader-id=
+2026-11-12T05:53:12.862Z [INFO]  raft: entering candidate state: node="Node at n1 [Candidate]" term=2
+2026-11-12T05:53:12.862Z [DEBUG] raft: pre-voting for self: term=2 id=n1
+2026-11-12T05:53:12.862Z [DEBUG] raft: asking for pre-vote: term=2 from=n2 address=n2
+2026-11-12T05:53:12.862Z [DEBUG] raft: asking for pre-vote: term=2 from=n3 address=n3
+2026-11-12T05:53:12.862Z [DEBUG] raft: calculated votes needed: needed=2 term=2
+2026-11-12T05:53:12.862Z [DEBUG] raft: pre-vote received: from=n1 term=2 tally=0
+2026-11-12T05:53:12.862Z [DEBUG] raft: pre-vote granted: from=n1 term=2 tally=1
+2026-11-12T05:53:12.862Z [DEBUG] raft: received a requestPreVote with a newer term, grant the pre-vote
+2026-11-12T05:53:12.862Z [DEBUG] raft: pre-vote received: from=n3 term=2 tally=1
+2026-11-12T05:53:12.862Z [DEBUG] raft: pre-vote granted: from=n3 term=2 tally=2
+2026-11-12T05:53:12.862Z [INFO]  raft: pre-vote successful, starting election: term=2 tally=2 refused=0 votesNeeded=2
+2026-11-12T05:53:12.862Z [DEBUG] raft: received a requestPreVote with a newer term, grant the pre-vote
+2026-11-12T05:53:12.863Z [DEBUG] raft: voting for self: term=2 id=n1
+2026-11-12T05:53:12.865Z [DEBUG] raft: asking for vote: term=2 from=n2 address=n2
+2026-11-12T05:53:12.865Z [DEBUG] raft: asking for vote: term=2 from=n3 address=n3
+2026-11-12T05:53:12.865Z [DEBUG] raft: vote granted: from=n1 term=2 tally=1
+2026-11-12T05:53:12.865Z [DEBUG] raft: lost leadership because received a requestVote with a newer term
+2026-11-12T05:53:12.865Z [DEBUG] raft: lost leadership because received a requestVote with a newer term
+2026-11-12T05:53:12.867Z [DEBUG] raft: vote granted: from=n3 term=2 tally=2
+2026-11-12T05:53:12.867Z [INFO]  raft: election won: term=2 tally=2
+2026-11-12T05:53:12.867Z [INFO]  raft: entering leader state: leader="Node at n1 [Leader]"
+2026-11-12T05:53:12.867Z [INFO]  raft: added peer, starting replication: peer=n2
+2026-11-12T05:53:12.867Z [INFO]  raft: added peer, starting replication: peer=n3
+2026-11-12T05:53:12.868Z [WARN]  raft: failed to get previous log: previous-index=1 last-index=0 error="log not found"
+2026-11-12T05:53:12.868Z [WARN]  raft: appendEntries rejected, sending older logs: peer="{Voter n3 n3}" next=1
+2026-11-12T05:53:12.868Z [WARN]  raft: failed to get previous log: previous-index=1 last-index=0 error="log not found"
+2026-11-12T05:53:12.868Z [WARN]  raft: appendEntries rejected, sending older logs: peer="{Voter n2 n2}" next=1
+2026-11-12T05:53:12.868Z [INFO]  raft: pipelining replication: peer="{Voter n3 n3}"
+2026-11-12T05:53:12.902Z [INFO]  raft: pipelining replication: peer="{Voter n2 n2}"
+2026-11-12T05:53:13.289Z [WARN]  raft: failed to contact: server-id=n2 time=54.770106ms
+2026-11-12T05:53:13.607Z [WARN]  raft: failed to contact: server-id=n2 time=53.899274ms
+2026-11-12T05:53:13.902Z [WARN]  raft: failed to contact: server-id=n2 time=50.11899ms
+2026-11-12T05:53:14.170Z [WARN]  raft: failed to contact: server-id=n2 time=58.414865ms
+2026-11-12T05:53:14.170Z [WARN]  raft: failed to contact: server-id=n3 time=70.200194ms
+2026-11-12T05:53:14.170Z [WARN]  raft: failed to contact quorum of nodes, stepping down
+2026-11-12T05:53:14.170Z [INFO]  raft: entering follower state: follower="Node at n1 [Follower]" leader-address= leader-id=
+2026-11-12T05:53:14.197Z [INFO]  raft: aborting pipeline replication: peer="{Voter n2 n2}"
+2026-11-12T05:53:14.239Z [WARN]  raft: heartbeat timeout reached, starting election: last-leader-addr= last-leader-id=
+2026-11-12T05:53:14.239Z [INFO]  raft: entering candidate state: node="Node at n1 [Candidate]" term=3
+2026-11-12T05:53:14.239Z [DEBUG] raft: pre-voting for self: term=3 id=n1
+2026-11-12T05:53:14.239Z [DEBUG] raft: asking for pre-vote: term=3 from=n2 address=n2
+2026-11-12T05:53:14.239Z [DEBUG] raft: asking for pre-vote: term=3 from=n3 address=n3
+2026-11-12T05:53:14.239Z [DEBUG] raft: calculated votes needed: needed=2 term=3
+2026-11-12T05:53:14.239Z [DEBUG] raft: pre-vote received: from=n1 term=3 tally=0
+2026-11-12T05:53:14.239Z [DEBUG] raft: pre-vote granted: from=n1 term=3 tally=1
+2026-11-12T05:53:14.239Z [DEBUG] raft: received a requestPreVote with a newer term, grant the pre-vote
+2026-11-12T05:53:14.239Z [DEBUG] raft: pre-vote received: from=n3 term=3 tally=1
+2026-11-12T05:53:14.239Z [DEBUG] raft: pre-vote granted: from=n3 term=3 tally=2
+2026-11-12T05:53:14.239Z [INFO]  raft: pre-vote successful, starting election: term=3 tally=2 refused=0 votesNeeded=2
+2026-11-12T05:53:14.241Z [DEBUG] raft: voting for self: term=3 id=n1
+2026-11-12T05:53:14.243Z [DEBUG] raft: asking for vote: term=3 from=n2 address=n2
+2026-11-12T05:53:14.243Z [DEBUG] raft: asking for vote: term=3 from=n3 address=n3
+2026-11-12T05:53:14.243Z [DEBUG] raft: vote granted: from=n1 term=3 tally=1
+2026-11-12T05:53:14.243Z [DEBUG] raft: lost leadership because received a requestVote with a newer term
+2026-11-12T05:53:14.246Z [DEBUG] raft: vote granted: from=n3 term=3 tally=2
+2026-11-12T05:53:14.246Z [INFO]  raft: election won: term=3 tally=2
+2026-11-12T05:53:14.246Z [INFO]  raft: entering leader state: leader="Node at n1 [Leader]"
+2026-11-12T05:53:14.246Z [INFO]  raft: added peer, starting replication: peer=n2
+2026-11-12T05:53:14.246Z [INFO]  raft: added peer, starting replication: peer=n3
+2026-11-12T05:53:14.249Z [DEBUG] raft: received a requestPreVote with a newer term, grant the pre-vote
+2026-11-12T05:53:14.249Z [DEBUG] raft: lost leadership because received a requestVote with a newer term
+2026-11-12T05:53:14.296Z [INFO]  raft: aborting pipeline replication: peer="{Voter n3 n3}"
+2026-11-12T05:53:14.296Z [INFO]  raft: pipelining replication: peer="{Voter n2 n2}"
+2026-11-12T05:53:14.333Z [INFO]  raft: pipelining replication: peer="{Voter n3 n3}"
+2026-11-12T05:53:14.358Z [WARN]  raft: failed to contact: server-id=n2 time=61.84321ms
+2026-11-12T05:53:14.384Z [WARN]  raft: failed to contact: server-id=n3 time=50.753839ms
+2026-11-12T05:53:15.015Z [WARN]  raft: failed to contact: server-id=n2 time=63.745353ms
+2026-11-12T05:53:15.015Z [WARN]  raft: failed to contact: server-id=n3 time=63.748907ms
+2026-11-12T05:53:15.015Z [WARN]  raft: failed to contact quorum of nodes, stepping down
+2026-11-12T05:53:15.015Z [INFO]  raft: entering follower state: follower="Node at n1 [Follower]" leader-address= leader-id=
+2026-11-12T05:53:15.015Z [WARN]  raft: heartbeat timeout reached, starting election: last-leader-addr=n1 last-leader-id=n1
+2026-11-12T05:53:15.015Z [INFO]  raft: entering candidate state: node="Node at n2 [Candidate]" term=4
+2026-11-12T05:53:15.015Z [DEBUG] raft: asking for pre-vote: term=4 from=n1 address=n1
+2026-11-12T05:53:15.015Z [DEBUG] raft: pre-voting for self: term=4 id=n2
+2026-11-12T05:53:15.015Z [DEBUG] raft: asking for pre-vote: term=4 from=n3 address=n3
+2026-11-12T05:53:15.015Z [DEBUG] raft: calculated votes needed: needed=2 term=4
+2026-11-12T05:53:15.015Z [DEBUG] raft: pre-vote received: from=n2 term=4 tally=0
+2026-11-12T05:53:15.015Z [DEBUG] raft: pre-vote granted: from=n2 term=4 tally=1
+2026-11-12T05:53:15.017Z [INFO]  raft: entering follower state: follower="Node at n2 [Follower]" leader-address=n1 leader-id=n1
+2026-11-12T05:53:15.027Z [DEBUG] raft: received a requestPreVote with a newer term, grant the pre-vote
+2026-11-12T05:53:15.027Z [WARN]  raft: rejecting pre-vote request since our last index is greater: candidate=n2 last-index=6 last-candidate-index=5
+2026-11-12T05:53:15.029Z [INFO]  raft: aborting pipeline replication: peer="{Voter n2 n2}"
+2026-11-12T05:53:15.083Z [WARN]  raft: rejecting pre-vote request since we have a leader: from=n2 leader=n1 leader-id=n1
+2026-11-12T05:53:15.086Z [INFO]  raft: aborting pipeline replication: peer="{Voter n3 n3}"
+2026-11-12T05:53:15.109Z [WARN]  raft: heartbeat timeout reached, starting election: last-leader-addr= last-leader-id=
+2026-11-12T05:53:15.109Z [INFO]  raft: entering candidate state: node="Node at n1 [Candidate]" term=4
+2026-11-12T05:53:15.109Z [DEBUG] raft: pre-voting for self: term=4 id=n1
+2026-11-12T05:53:15.109Z [DEBUG] raft: asking for pre-vote: term=4 from=n2 address=n2
+2026-11-12T05:53:15.109Z [DEBUG] raft: asking for pre-vote: term=4 from=n3 address=n3
+2026-11-12T05:53:15.109Z [DEBUG] raft: calculated votes needed: needed=2 term=4
+2026-11-12T05:53:15.109Z [DEBUG] raft: pre-vote received: from=n1 term=4 tally=0
+2026-11-12T05:53:15.109Z [DEBUG] raft: pre-vote granted: from=n1 term=4 tally=1
+2026-11-12T05:53:15.109Z [DEBUG] raft: received a requestPreVote with a newer term, grant the pre-vote
+2026-11-12T05:53:15.109Z [DEBUG] raft: pre-vote received: from=n3 term=4 tally=1
+2026-11-12T05:53:15.109Z [DEBUG] raft: pre-vote granted: from=n3 term=4 tally=2
+2026-11-12T05:53:15.109Z [INFO]  raft: pre-vote successful, starting election: term=4 tally=2 refused=0 votesNeeded=2
+2026-11-12T05:53:15.124Z [DEBUG] raft: voting for self: term=4 id=n1
+2026-11-12T05:53:15.126Z [DEBUG] raft: received a requestPreVote with a newer term, grant the pre-vote
+2026-11-12T05:53:15.126Z [DEBUG] raft: asking for vote: term=4 from=n2 address=n2
+2026-11-12T05:53:15.126Z [DEBUG] raft: asking for vote: term=4 from=n3 address=n3
+2026-11-12T05:53:15.126Z [DEBUG] raft: vote granted: from=n1 term=4 tally=1
+2026-11-12T05:53:15.126Z [DEBUG] raft: lost leadership because received a requestVote with a newer term
+2026-11-12T05:53:15.126Z [DEBUG] raft: lost leadership because received a requestVote with a newer term
+2026-11-12T05:53:15.130Z [DEBUG] raft: vote granted: from=n3 term=4 tally=2
+2026-11-12T05:53:15.130Z [INFO]  raft: election won: term=4 tally=2
+2026-11-12T05:53:15.130Z [INFO]  raft: entering leader state: leader="Node at n1 [Leader]"
+2026-11-12T05:53:15.130Z [INFO]  raft: added peer, starting replication: peer=n2
+2026-11-12T05:53:15.130Z [INFO]  raft: added peer, starting replication: peer=n3
+2026-11-12T05:53:15.197Z [INFO]  raft: pipelining replication: peer="{Voter n3 n3}"
+2026-11-12T05:53:15.217Z [INFO]  raft: pipelining replication: peer="{Voter n2 n2}"
+2026-11-12T05:53:15.274Z [WARN]  raft: failed to contact: server-id=n2 time=57.016387ms
+2026-11-12T05:53:15.313Z [WARN]  raft: failed to contact: server-id=n3 time=53.790695ms
+2026-11-12T05:53:15.998Z [WARN]  raft: failed to contact: server-id=n3 time=62.093727ms
+2026-11-12T05:53:15.998Z [WARN]  raft: heartbeat timeout reached, starting election: last-leader-addr=n1 last-leader-id=n1
+2026-11-12T05:53:15.998Z [INFO]  raft: entering candidate state: node="Node at n3 [Candidate]" term=5
+2026-11-12T05:53:15.998Z [DEBUG] raft: asking for pre-vote: term=5 from=n1 address=n1
+2026-11-12T05:53:15.998Z [DEBUG] raft: asking for pre-vote: term=5 from=n2 address=n2
+2026-11-12T05:53:15.998Z [DEBUG] raft: pre-voting for self: term=5 id=n3
+2026-11-12T05:53:15.998Z [DEBUG] raft: calculated votes needed: needed=2 term=5
+2026-11-12T05:53:15.998Z [DEBUG] raft: pre-vote received: from=n3 term=5 tally=0
+2026-11-12T05:53:15.998Z [DEBUG] raft: pre-vote granted: from=n3 term=5 tally=1
+2026-11-12T05:53:16.000Z [INFO]  raft: entering follower state: follower="Node at n3 [Follower]" leader-address=n1 leader-id=n1
+2026-11-12T05:53:16.000Z [WARN]  raft: rejecting pre-vote request since we have a leader: from=n3 leader=n1 leader-id=n1
+2026-11-12T05:53:16.033Z [WARN]  raft: failed to contact: server-id=n2 time=80.540905ms
+2026-11-12T05:53:16.049Z [WARN]  raft: rejecting pre-vote request since we have a leader: from=n3 leader=n1 leader-id=n1
+2026-11-12T05:53:16.064Z [WARN]  raft: failed to contact: server-id=n2 time=110.711247ms
+2026-11-12T05:53:16.064Z [WARN]  raft: failed to contact: server-id=n3 time=63.855082ms
+2026-11-12T05:53:16.064Z [WARN]  raft: failed to contact quorum of nodes, stepping down
+2026-11-12T05:53:16.064Z [INFO]  raft: entering follower state: follower="Node at n1 [Follower]" leader-address= leader-id=
+2026-11-12T05:53:16.072Z [INFO]  raft: aborting pipeline replication: peer="{Voter n3 n3}"
+2026-11-12T05:53:16.076Z [INFO]  raft: aborting pipeline replication: peer="{Voter n2 n2}"
+2026-11-12T05:53:16.153Z [WARN]  raft: heartbeat timeout reached, starting election: last-leader-addr=n1 last-leader-id=n1
+2026-11-12T05:53:16.153Z [INFO]  raft: entering candidate state: node="Node at n3 [Candidate]" term=5
+2026-11-12T05:53:16.153Z [DEBUG] raft: asking for pre-vote: term=5 from=n1 address=n1
+2026-11-12T05:53:16.153Z [DEBUG] raft: asking for pre-vote: term=5 from=n2 address=n2
+2026-11-12T05:53:16.153Z [DEBUG] raft: pre-voting for self: term=5 id=n3
+2026-11-12T05:53:16.153Z [DEBUG] raft: calculated votes needed: needed=2 term=5
+2026-11-12T05:53:16.153Z [DEBUG] raft: pre-vote received: from=n3 term=5 tally=0
+2026-11-12T05:53:16.153Z [DEBUG] raft: pre-vote granted: from=n3 term=5 tally=1
+2026-11-12T05:53:16.153Z [WARN]  raft: rejecting pre-vote request since we have a leader: from=n3 leader=n1 leader-id=n1
+2026-11-12T05:53:16.153Z [DEBUG] raft: pre-vote received: from=n2 term=4 tally=1
+2026-11-12T05:53:16.153Z [DEBUG] raft: pre-vote denied: from=n2 term=4 tally=1
+2026-11-12T05:53:16.153Z [DEBUG] raft: received a requestPreVote with a newer term, grant the pre-vote
+2026-11-12T05:53:16.153Z [DEBUG] raft: pre-vote received: from=n1 term=5 tally=1
+2026-11-12T05:53:16.153Z [DEBUG] raft: pre-vote granted: from=n1 term=5 tally=2
+2026-11-12T05:53:16.153Z [INFO]  raft: pre-vote successful, starting election: term=5 tally=2 refused=1 votesNeeded=2
+2026-11-12T05:53:16.154Z [DEBUG] raft: asking for vote: term=5 from=n1 address=n1
+2026-11-12T05:53:16.154Z [DEBUG] raft: asking for vote: term=5 from=n2 address=n2
+2026-11-12T05:53:16.154Z [DEBUG] raft: voting for self: term=5 id=n3
+2026-11-12T05:53:16.156Z [DEBUG] raft: vote granted: from=n3 term=5 tally=1
+2026-11-12T05:53:16.156Z [WARN]  raft: rejecting vote request since we have a leader: from=n3 leader=n1 leader-id=n1
+2026-11-12T05:53:16.156Z [DEBUG] raft: lost leadership because received a requestVote with a newer term
+2026-11-12T05:53:16.159Z [WARN]  raft: heartbeat timeout reached, starting election: last-leader-addr=n1 last-leader-id=n1
+2026-11-12T05:53:16.159Z [INFO]  raft: entering candidate state: node="Node at n2 [Candidate]" term=5
+2026-11-12T05:53:16.159Z [DEBUG] raft: asking for pre-vote: term=5 from=n1 address=n1
+2026-11-12T05:53:16.159Z [DEBUG] raft: pre-voting for self: term=5 id=n2
+2026-11-12T05:53:16.159Z [DEBUG] raft: asking for pre-vote: term=5 from=n3 address=n3
+2026-11-12T05:53:16.159Z [DEBUG] raft: calculated votes needed: needed=2 term=5
+2026-11-12T05:53:16.159Z [DEBUG] raft: pre-vote received: from=n2 term=5 tally=0
+2026-11-12T05:53:16.159Z [DEBUG] raft: pre-vote granted: from=n2 term=5 tally=1
+2026-11-12T05:53:16.159Z [DEBUG] raft: pre-vote received: from=n3 term=5 tally=1
+2026-11-12T05:53:16.159Z [DEBUG] raft: pre-vote granted: from=n3 term=5 tally=2
+2026-11-12T05:53:16.159Z [INFO]  raft: pre-vote successful, starting election: term=5 tally=2 refused=0 votesNeeded=2
+2026-11-12T05:53:16.160Z [DEBUG] raft: asking for vote: term=5 from=n1 address=n1
+2026-11-12T05:53:16.160Z [DEBUG] raft: voting for self: term=5 id=n2
+2026-11-12T05:53:16.162Z [DEBUG] raft: asking for vote: term=5 from=n3 address=n3
+2026-11-12T05:53:16.162Z [DEBUG] raft: vote granted: from=n2 term=5 tally=1
+2026-11-12T05:53:16.162Z [DEBUG] raft: vote granted: from=n1 term=5 tally=2
+2026-11-12T05:53:16.162Z [INFO]  raft: election won: term=5 tally=2
+2026-11-12T05:53:16.162Z [INFO]  raft: entering leader state: leader="Node at n3 [Leader]"
+2026-11-12T05:53:16.162Z [INFO]  raft: added peer, starting replication: peer=n1
+2026-11-12T05:53:16.162Z [INFO]  raft: added peer, starting replication: peer=n2
+2026-11-12T05:53:16.172Z [INFO]  raft: duplicate requestVote for same term: term=5
+2026-11-12T05:53:16.198Z [INFO]  raft: pipelining replication: peer="{Voter n1 n1}"
+2026-11-12T05:53:16.223Z [INFO]  raft: entering follower state: follower="Node at n2 [Follower]" leader-address=n3 leader-id=n3
+2026-11-12T05:53:16.223Z [INFO]  raft: pipelining replication: peer="{Voter n2 n2}"
+2026-11-12T05:53:16.264Z [WARN]  raft: rejecting vote request since we have a leader: from=n2 leader=n3 leader-id=n3
+2026-11-12T05:53:42.921Z [INFO]  raft: aborting pipeline replication: peer="{Voter n2 n2}"
+2026-11-12T05:53:42.921Z [INFO]  raft: aborting pipeline replication: peer="{Voter n1 n1}"

@@ -1,0 +1,4 @@
++ sh scripts/nanos-crash-test-x86.sh /root/.ops/0.1.56/kernel.img /root/nanos/image-crashwrite /root/nanos/image-crashverify /root/.ops/volumes/qualvol:bdb9d512-0ffa-6ed9-e75e-a1355118b1de.raw qemu-system-x86_64
+CRASHTEST power-loss injected
+QUAL crashverify PASS durable prefix survived power loss; unsynced tail discarded
+CRASHTEST PASS

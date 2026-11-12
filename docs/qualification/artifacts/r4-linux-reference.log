@@ -1,0 +1,24 @@
+ok  	github.com/sufuree/raft	0.004s
+ok  	github.com/sufuree/raft/bootstrap	0.008s
+ok  	github.com/sufuree/raft/driver	0.431s
+ok  	github.com/sufuree/raft/sim	0.670s
+ok  	github.com/sufuree/raft/transport	0.224s
+ok  	github.com/sufuree/raft/wal	0.073s
+ok  	github.com/sufuree/raft	1.022s
+ok  	github.com/sufuree/raft/bootstrap	1.015s
+ok  	github.com/sufuree/raft/driver	2.262s
+ok  	github.com/sufuree/raft/sim	3.935s
+ok  	github.com/sufuree/raft/transport	1.292s
+ok  	github.com/sufuree/raft/wal	1.493s
+QUAL start mode=full go=go1.27.4 arch=linux/amd64 gomaxprocs=1 dir=/root/qual-data
+QUAL wal-file PASS write/sync/reopen/snapshot/reclaim verified
+QUAL wal-block PASS write/sync/reopen/snapshot/reclaim verified
+QUAL locking PASS advisory lock acquired (not an ownership fence)
+QUAL fssub-flush PASS write+fsync+reopen verified (WAL durable receipt)
+QUAL fssub-rename PASS write+fsync+rename-over verified (atomic publication)
+QUAL fssub-dirsync PASS directory fsync accepted
+QUAL fssub-create-remove PASS create+remove verified
+QUAL single-voter PASS 100 commits in 242.925302ms, restart-to-leader 2.214056ms
+QUAL cluster PASS 3-voter in-guest commit + read barrier verified
+QUAL resources PASS heapAlloc=11616352 heapSys=16416768 numGC=4
+QUAL DONE

@@ -1,0 +1,24 @@
+=== PLATFORM PINS ===
+go version go1.27.4 linux/arm64
+Linux ip-172-31-19-184.us-west-1.compute.internal 6.12.114-139.210.amzn2023.aarch64 #1 SMP Mon Nov  2 23:12:07 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+QEMU emulator version 11.0.0 (qemu-11.0.0-4.amzn2023)
+Ops version: 0.1.47
+Nanos version: 0.0
+NAME="Amazon Linux"
+VERSION="2023"
+0.1.56-arm
+common
+common.tar.gz
+composes
+crossbuild
+images
+instances
+local_packages
+manifests
+networks
+packages
+volumes
+2
+               total        used        free      shared  buff/cache   available
+Mem:            7763         273        5395           8        2094        7278
+Swap:              0           0           0

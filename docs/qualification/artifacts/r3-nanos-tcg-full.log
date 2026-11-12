@@ -1,0 +1,1 @@
+qemu-system-aarch64: -netdev user,id=n0: Parameter 'type' does not accept value 'user'

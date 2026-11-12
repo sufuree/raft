@@ -1,0 +1,26 @@
+PROBE start go=go1.27.4 arch=linux/amd64 dir=/root/bench-out/bboltprobe-linux
+PROBE open-flock-mmap PASS bolt.Open ok in 2.076829ms
+PROBE write-fsync PASS bucket create + 1 KiB put + commit ok
+PROBE mmap-growth PASS 1000 puts (mmap remap) ok in 18.96603ms
+PROBE read-view PASS read 1000 keys ok
+PROBE reopen-flock PASS close + reopen ok
+PROBE raft-boltstore PASS raft-boltdb NewBoltStore ok
+2026-11-12T05:21:26.974Z [INFO]  raft: initial configuration: index=0 servers=[]
+PROBE raft-new PASS HashiCorp NewRaft ok
+2026-11-12T05:21:26.974Z [INFO]  raft: entering follower state: follower="Node at 1 [Follower]" leader-address= leader-id=
+2026-11-12T05:21:27.035Z [WARN]  raft: heartbeat timeout reached, starting election: last-leader-addr= last-leader-id=
+2026-11-12T05:21:27.035Z [INFO]  raft: entering candidate state: node="Node at 1 [Candidate]" term=2
+2026-11-12T05:21:27.035Z [DEBUG] raft: pre-voting for self: term=2 id=1
+2026-11-12T05:21:27.035Z [DEBUG] raft: calculated votes needed: needed=1 term=2
+2026-11-12T05:21:27.035Z [DEBUG] raft: pre-vote received: from=1 term=2 tally=0
+2026-11-12T05:21:27.035Z [DEBUG] raft: pre-vote granted: from=1 term=2 tally=1
+2026-11-12T05:21:27.035Z [INFO]  raft: pre-vote successful, starting election: term=2 tally=1 refused=0 votesNeeded=1
+2026-11-12T05:21:27.037Z [DEBUG] raft: voting for self: term=2 id=1
+2026-11-12T05:21:27.041Z [DEBUG] raft: vote granted: from=1 term=2 tally=1
+2026-11-12T05:21:27.041Z [INFO]  raft: election won: term=2 tally=1
+2026-11-12T05:21:27.041Z [INFO]  raft: entering leader state: leader="Node at 1 [Leader]"
+PROBE raft-leader PASS single voter elected
+PROBE raft-apply PASS 100 commits in 238.254947ms
+PROBE raft-barrier PASS read barrier ok
+PROBE raft-shutdown PASS shutdown ok
+PROBE DONE

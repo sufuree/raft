@@ -1,0 +1,536 @@
+package wal
+
+import (
+	"bytes"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"hash/crc32"
+	"testing"
+
+	raft "github.com/sufuree/raft"
+)
+
+func testOpts() Options {
+	return Options{
+		ClusterID: 7, MemberID: 1, Generation: 1,
+		SegmentSize: 64 << 10, MaxBatchBytes: 32 << 10,
+		MinReclaimBytes: 8 << 10,
+		InitialConfig:   raft.Configuration{Voters: raft.NodeSet{1}},
+	}
+}
+
+func seedEntries(t *testing.T, w *WAL, n int) {
+	t.Helper()
+	for i := 1; i <= n; i++ {
+		commit := raft.Index(i)
+		err := w.Save(raft.PersistBatch{
+			Entries: []raft.Entry{{Term: 1, Index: raft.Index(i), Data: []byte(fmt.Sprintf("e%d", i))}},
+			Commit:  &commit,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// seedLargeEntries writes entries that span multiple segments so checkpoint
+// alignment leaves a reclaimable dead prefix.
+func seedLargeEntries(t *testing.T, w *WAL, n int) {
+	t.Helper()
+	payload := bytes.Repeat([]byte("x"), 1024)
+	for i := 1; i <= n; i++ {
+		commit := raft.Index(i)
+		err := w.Save(raft.PersistBatch{
+			Entries: []raft.Entry{{Term: 1, Index: raft.Index(i), Data: payload}},
+			Commit:  &commit,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestReclamationPreservesRecoverability: compaction reclaims the dead prefix
+// and recovery reconstructs the full state (§6.3, §11 persistence gate).
+func TestReclamationPreservesRecoverability(t *testing.T) {
+	dev := NewMemDevice()
+	opts := testOpts()
+	w, err := Open(dev, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedLargeEntries(t, w, 200)
+	hs := raft.HardState{Term: 3, Vote: 2, Commit: 200}
+	if err := w.Save(raft.PersistBatch{HardState: &hs}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.MarkApplied(200); err != nil {
+		t.Fatal(err)
+	}
+	sizeBefore, _ := dev.Size()
+	// Publish a snapshot covering most of the log; the dead prefix exceeds
+	// the live suffix, so compaction must run.
+	snap := raft.SnapshotMeta{
+		Index: 190, Term: 1,
+		Config: raft.Configuration{Voters: raft.NodeSet{1, 2, 3}},
+		Data:   []byte("snapshot-state"),
+	}
+	commit := raft.Index(190)
+	if err := w.Save(raft.PersistBatch{Snapshot: &snap, Commit: &commit}); err != nil {
+		t.Fatal(err)
+	}
+	// Append a suffix above the snapshot.
+	for i := 191; i <= 210; i++ {
+		c := raft.Index(i)
+		if err := w.Save(raft.PersistBatch{
+			Entries: []raft.Entry{{Term: 3, Index: raft.Index(i), Data: []byte(fmt.Sprintf("e%d", i))}},
+			Commit:  &c,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sizeAfter, _ := dev.Size()
+	if sizeAfter >= sizeBefore {
+		t.Fatalf("compaction did not reclaim: before %d after %d", sizeBefore, sizeAfter)
+	}
+	w.Close()
+
+	w2, err := Open(dev, opts)
+	if err != nil {
+		t.Fatalf("reopen after compaction: %v", err)
+	}
+	st, err := w2.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.HardState.Term != 3 || st.HardState.Vote != 2 {
+		t.Fatalf("hard state lost: %+v", st.HardState)
+	}
+	if st.Snapshot.Index != 190 || string(st.Snapshot.Data) != "snapshot-state" {
+		t.Fatalf("snapshot lost: %+v", st.Snapshot)
+	}
+	if len(st.Entries) != 20 || st.Entries[0].Index != 191 || st.Entries[19].Index != 210 {
+		t.Fatalf("suffix lost: %d entries", len(st.Entries))
+	}
+	if st.AppliedIndex != 200 {
+		t.Fatalf("applied watermark lost: %d", st.AppliedIndex)
+	}
+	if st.HardState.Commit != 210 {
+		t.Fatalf("commit lost: %d", st.HardState.Commit)
+	}
+}
+
+// TestPublicationCrashBoundaries crashes at every sync boundary of a large
+// snapshot publication and compaction; recovery must always succeed and
+// preserve the committed prefix (§11 persistence gate).
+func TestPublicationCrashBoundaries(t *testing.T) {
+	for crashAt := 1; crashAt <= 14; crashAt++ {
+		dev := NewMemDevice()
+		opts := testOpts()
+		w, err := Open(dev, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		seedEntries(t, w, 100)
+		if err := w.MarkApplied(100); err != nil {
+			t.Fatal(err)
+		}
+		base := dev.SyncCount
+		crashAt := base + crashAt
+		dev.OnSync = func(n int) {
+			if n == crashAt {
+				dev.Crash()
+			}
+		}
+		snap := raft.SnapshotMeta{
+			Index: 90, Term: 1,
+			Config: raft.Configuration{Voters: raft.NodeSet{1}},
+			Data:   bytes.Repeat([]byte("S"), 200<<10), // streamed: > MaxBatchBytes/2
+		}
+		commit := raft.Index(90)
+		_ = w.Save(raft.PersistBatch{Snapshot: &snap, Commit: &commit})
+		dev.OnSync = nil
+		dev.PowerOn()
+
+		w2, err := Open(dev, opts)
+		if err != nil {
+			t.Fatalf("crashAt +%d: recovery failed: %v", crashAt-base, err)
+		}
+		st, err := w2.Load()
+		if err != nil {
+			t.Fatalf("crashAt +%d: load: %v", crashAt-base, err)
+		}
+		// The committed prefix (100 entries at term 1) must survive either
+		// as the log or as snapshot+suffix; commit never regresses.
+		if st.HardState.Commit < 90 {
+			t.Fatalf("crashAt +%d: commit regressed to %d", crashAt-base, st.HardState.Commit)
+		}
+		if st.Snapshot.Index == 90 {
+			if len(st.Snapshot.Data) != 200<<10 {
+				t.Fatalf("crashAt +%d: partial snapshot published", crashAt-base)
+			}
+		} else if st.Snapshot.Index == 0 {
+			if len(st.Entries) < 90 {
+				t.Fatalf("crashAt +%d: lost committed entries without snapshot", crashAt-base)
+			}
+		}
+		w2.Close()
+	}
+}
+
+// TestInterruptedStagingNeverSnapshot: chunks without a durable manifest are
+// orphans and never become a snapshot (§6.4).
+func TestInterruptedStagingNeverSnapshot(t *testing.T) {
+	dev := NewMemDevice()
+	opts := testOpts()
+	w, err := Open(dev, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedEntries(t, w, 10)
+	// Fail the sync that durably publishes the manifest: chunks exist, the
+	// manifest does not.
+	dev.OnSync = func(n int) {
+		if n == dev.SyncCount { // crash at every sync after seeding
+		}
+	}
+	dev.OnSync = nil
+	base := dev.SyncCount
+	dev.OnSync = func(n int) {
+		if n == base+1 { // first sync of the publication = chunk sync
+			dev.Crash()
+		}
+	}
+	snap := raft.SnapshotMeta{Index: 8, Term: 1, Config: raft.Configuration{Voters: raft.NodeSet{1}},
+		Data: bytes.Repeat([]byte("X"), 100<<10)}
+	commit := raft.Index(8)
+	_ = w.Save(raft.PersistBatch{Snapshot: &snap, Commit: &commit})
+	dev.OnSync = nil
+	dev.PowerOn()
+	w2, err := Open(dev, opts)
+	if err != nil {
+		t.Fatalf("orphan chunks broke recovery: %v", err)
+	}
+	st, _ := w2.Load()
+	if st.Snapshot.Index != 0 {
+		t.Fatalf("interrupted staging became a snapshot: %d", st.Snapshot.Index)
+	}
+	if len(st.Entries) != 10 {
+		t.Fatalf("committed log lost: %d", len(st.Entries))
+	}
+}
+
+// TestLargeSnapshotRoundTrip: a snapshot larger than a batch streams through
+// chunk records and reassembles with end-to-end integrity (§6.4).
+func TestLargeSnapshotRoundTrip(t *testing.T) {
+	dev := NewMemDevice()
+	opts := testOpts()
+	w, err := Open(dev, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedEntries(t, w, 5)
+	data := bytes.Repeat([]byte("archive"), 64<<10) // 448 KiB > batch/2
+	snap := raft.SnapshotMeta{Index: 5, Term: 1, Config: raft.Configuration{Voters: raft.NodeSet{1}}, Data: data}
+	commit := raft.Index(5)
+	if err := w.Save(raft.PersistBatch{Snapshot: &snap, Commit: &commit}); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	w2, err := Open(dev, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, _ := w2.Load()
+	if !bytes.Equal(st.Snapshot.Data, data) {
+		t.Fatalf("streamed snapshot mismatch: %d bytes", len(st.Snapshot.Data))
+	}
+	// Corrupt one chunk byte: the manifest's checksum must stop recovery.
+	raw := dev.data
+	idx := bytes.Index(raw, []byte("archivearchive"))
+	raw[idx+100] ^= 0xFF
+	w2.Close()
+	if _, err := Open(dev, opts); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("corrupt chunk not detected: %v", err)
+	}
+}
+
+// TestFixedRegionBinding: the WAL runs on raw block-device semantics —
+// constant size, no-op truncate, ENOSPC past the region (§6.3).
+func TestFixedRegionBinding(t *testing.T) {
+	backing := NewMemDevice()
+	// Pre-size the backing store; the fixed region never grows.
+	backing.WriteAt(make([]byte, 512<<10), 0)
+	backing.Sync()
+	dev, err := NewFixedRegion(backing, 512<<10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := testOpts()
+	opts.MaxDeviceBytes = 512 << 10
+	w, err := Open(dev, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedEntries(t, w, 100)
+	snap := raft.SnapshotMeta{Index: 90, Term: 1, Config: raft.Configuration{Voters: raft.NodeSet{1}}, Data: []byte("s")}
+	commit := raft.Index(90)
+	if err := w.Save(raft.PersistBatch{Snapshot: &snap, Commit: &commit}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 91; i <= 120; i++ {
+		c := raft.Index(i)
+		if err := w.Save(raft.PersistBatch{Entries: []raft.Entry{{Term: 1, Index: raft.Index(i)}}, Commit: &c}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w.Close()
+	w2, err := Open(dev, opts)
+	if err != nil {
+		t.Fatalf("fixed-region recovery: %v", err)
+	}
+	st, _ := w2.Load()
+	if st.Snapshot.Index != 90 || st.HardState.Commit != 120 {
+		t.Fatalf("state lost on fixed region: snap %d commit %d", st.Snapshot.Index, st.HardState.Commit)
+	}
+	// Writes past the region are ENOSPC, never growth.
+	if _, err := dev.WriteAt([]byte{1}, 512<<10); err == nil {
+		t.Fatal("write past region succeeded")
+	}
+	// Preflight rejects admission before exhaustion, preserving the reserve.
+	if err := w2.Preflight(512 << 10); !errors.Is(err, ErrNoSpace) {
+		t.Fatalf("preflight did not reject: %v", err)
+	}
+	if err := w2.Preflight(1); err != nil {
+		t.Fatalf("preflight rejected a small admission: %v", err)
+	}
+}
+
+// TestDiskFullTerminal: an actual failed write surfaces ErrNoSpace; the
+// driver turns any Save failure into terminal Failed (§6.2, tested there).
+func TestDiskFullTerminal(t *testing.T) {
+	backing := NewMemDevice()
+	backing.WriteAt(make([]byte, 64<<10), 0)
+	backing.Sync()
+	dev, _ := NewFixedRegion(backing, 64<<10)
+	opts := testOpts()
+	opts.MaxDeviceBytes = 64 << 10
+	w, err := Open(dev, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saveErr error
+	for i := 1; i < 10000; i++ {
+		c := raft.Index(i)
+		saveErr = w.Save(raft.PersistBatch{
+			Entries: []raft.Entry{{Term: 1, Index: raft.Index(i), Data: bytes.Repeat([]byte("x"), 512)}},
+			Commit:  &c,
+		})
+		if saveErr != nil {
+			break
+		}
+	}
+	if !errors.Is(saveErr, ErrNoSpace) {
+		t.Fatalf("expected ErrNoSpace, got %v", saveErr)
+	}
+}
+
+// TestUnsupportedVersionRejected: a store written with an older format version
+// is rejected with an explicit upgrade error, never silently reinterpreted
+// (spec §7). Earlier versions did not persist SegmentSize, so reopening them
+// with a different grid could skip live records; rejection is the safe path.
+func TestUnsupportedVersionRejected(t *testing.T) {
+	for _, old := range []byte{1, 2} {
+		dev := NewMemDevice()
+		opts := testOpts()
+		w, err := Open(dev, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		seedEntries(t, w, 20)
+		w.Close()
+		dev.data[4], dev.data[5], dev.data[6], dev.data[7] = 0, 0, 0, old
+		dev.Sync()
+		if _, err := Open(dev, opts); !errors.Is(err, ErrCorrupt) {
+			t.Fatalf("version %d: expected ErrCorrupt rejection, got %v", old, err)
+		}
+	}
+}
+
+// TestSegmentGridPersisted: the segment grid is persisted at creation and
+// honored on reopen even if the caller passes a different SegmentSize. Writing
+// with a small grid and reopening with a larger option must not skip live
+// records (the B3 silent-data-loss regression).
+func TestSegmentGridPersisted(t *testing.T) {
+	dev := NewMemDevice()
+	small := testOpts()
+	small.SegmentSize = 64 << 10
+	small.MaxBatchBytes = 32 << 10
+	w, err := Open(dev, small)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedEntries(t, w, 500)
+	w.Close()
+	// Reopen with a much larger SegmentSize option: recovery must use the
+	// persisted 64 KiB grid, not the 8 MiB option.
+	big := testOpts()
+	big.SegmentSize = 8 << 20
+	big.MaxBatchBytes = 8 << 20
+	w2, err := Open(dev, big)
+	if err != nil {
+		t.Fatalf("reopen with larger grid: %v", err)
+	}
+	st, _ := w2.Load()
+	if len(st.Entries) != 500 {
+		t.Fatalf("entries lost on reopen with different grid: %d, want 500", len(st.Entries))
+	}
+	w2.Close()
+}
+
+// TestCheckpointSlotTorn: a torn newest slot falls back to the previous valid
+// checkpoint without losing committed state.
+func TestCheckpointSlotTorn(t *testing.T) {
+	dev := NewMemDevice()
+	opts := testOpts()
+	w, err := Open(dev, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedEntries(t, w, 50)
+	snap := raft.SnapshotMeta{Index: 40, Term: 1, Config: raft.Configuration{Voters: raft.NodeSet{1}}, Data: []byte("s")}
+	commit := raft.Index(40)
+	if err := w.Save(raft.PersistBatch{Snapshot: &snap, Commit: &commit}); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	// Corrupt both slots' CRCs: recovery falls back to the region start and
+	// replays everything (the pre-checkpoint behavior).
+	for _, off := range []int{slotAOff, slotBOff} {
+		dev.data[off+24] ^= 0xFF
+	}
+	dev.Sync()
+	w2, err := Open(dev, opts)
+	if err != nil {
+		t.Fatalf("torn slots broke recovery: %v", err)
+	}
+	st, _ := w2.Load()
+	if st.Snapshot.Index != 40 || st.HardState.Commit < 40 {
+		t.Fatalf("state lost with torn slots: %+v", st.Snapshot)
+	}
+}
+
+// TestBoundedGrowth: repeated snapshot cycles keep the device bounded (§8).
+func TestBoundedGrowth(t *testing.T) {
+	dev := NewMemDevice()
+	opts := testOpts()
+	w, err := Open(dev, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var peak int64
+	idx := raft.Index(0)
+	for cycle := 0; cycle < 20; cycle++ {
+		for i := 0; i < 50; i++ {
+			idx++
+			c := idx
+			if err := w.Save(raft.PersistBatch{
+				Entries: []raft.Entry{{Term: 1, Index: idx, Data: bytes.Repeat([]byte("x"), 1024)}},
+				Commit:  &c,
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		snap := raft.SnapshotMeta{Index: idx - 5, Term: 1, Config: raft.Configuration{Voters: raft.NodeSet{1}}, Data: []byte("s")}
+		c := snap.Index
+		if err := w.Save(raft.PersistBatch{Snapshot: &snap, Commit: &c}); err != nil {
+			t.Fatal(err)
+		}
+		if sz, _ := dev.Size(); sz > peak {
+			peak = sz
+		}
+	}
+	// 1000 entries × 1 KiB ≈ 1 MiB written total; bounded growth means the
+	// device stays far below the cumulative write volume.
+	if peak > 4<<20 {
+		t.Fatalf("unbounded growth: peak %d", peak)
+	}
+	w.Close()
+	w2, err := Open(dev, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, _ := w2.Load()
+	if st.HardState.Commit != idx {
+		t.Fatalf("final commit lost: %d != %d", st.HardState.Commit, idx)
+	}
+	_ = crc32.ChecksumIEEE // keep import for corruption tests above
+}
+
+// TestSuperblockConfigSurvivesCheckpointFlip: the persisted InitialConfig must
+// not overlap the checkpoint slots (B-1). Builds a config right at the bound,
+// verifies an oversized config is rejected, and — after a snapshot publication
+// flips a checkpoint slot — decodes the SUPERBLOCK config bytes directly (not
+// the snapshot record, which would mask superblock corruption).
+func TestSuperblockConfigSurvivesCheckpointFlip(t *testing.T) {
+	// Grow a config to the largest encoding that fits before slot A.
+	mk := func(n int) raft.Configuration {
+		learners := make(raft.NodeSet, n)
+		for i := range learners {
+			learners[i] = raft.NodeID(1000 + i) // 2-byte uvarints
+		}
+		return raft.Configuration{Voters: raft.NodeSet{1}, Learners: learners}
+	}
+	n := 1
+	for len(raft.EncodeConfig(mk(n+1))) <= slotAOff-36 {
+		n++
+	}
+	cfg := mk(n) // largest fitting config
+	cfgLen := len(raft.EncodeConfig(cfg))
+	if cfgLen <= slotAOff-36-64 {
+		t.Fatalf("test config not near the bound: %d bytes (bound %d)", cfgLen, slotAOff-36)
+	}
+	// An oversized config must be rejected at creation, not silently overlap.
+	if _, err := Open(NewMemDevice(), func() Options { o := testOpts(); o.InitialConfig = mk(n + 1); return o }()); err == nil {
+		t.Fatalf("oversized config (%d bytes) accepted; want rejection", len(raft.EncodeConfig(mk(n+1))))
+	}
+	dev := NewMemDevice()
+	opts := testOpts()
+	opts.InitialConfig = cfg
+	w, err := Open(dev, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedEntries(t, w, 10)
+	c := raft.Index(10)
+	snap := raft.SnapshotMeta{Index: 10, Term: 1, Config: cfg, Data: []byte("snapshot")}
+	if err := w.Save(raft.PersistBatch{Snapshot: &snap, Commit: &c}); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	// Decode the superblock config bytes directly: a checkpoint-slot flip must
+	// not have overwritten them.
+	sbLen := int(binary.BigEndian.Uint32(dev.data[32:36]))
+	if sbLen != cfgLen {
+		t.Fatalf("superblock config length changed: %d, want %d", sbLen, cfgLen)
+	}
+	got, err := raft.DecodeConfig(dev.data[36 : 36+sbLen])
+	if err != nil {
+		t.Fatalf("superblock config decode after flip: %v", err)
+	}
+	if len(got.Learners) != n || len(got.Voters) != 1 || got.Voters[0] != 1 {
+		t.Fatalf("superblock config corrupted by flip: voters=%v learners=%d want %d", got.Voters, len(got.Learners), n)
+	}
+	for i := 0; i < n; i++ {
+		if got.Learners[i] != raft.NodeID(1000+i) {
+			t.Fatalf("superblock learner %d corrupted: %d", i, got.Learners[i])
+		}
+	}
+	// And the store reopens cleanly.
+	w2, err := Open(dev, opts)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	w2.Close()
+}

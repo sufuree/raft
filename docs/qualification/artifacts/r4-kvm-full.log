@@ -1,0 +1,20 @@
+c[?7l[2J[0mSeaBIOS (version 1.17.0-1.amzn2023)
+
+
+iPXE (http://ipxe.org) 00:02.0 CA00 PCI2.10 PnP PMM+1EFD3CC0+1EF33CC0 CA00
+Press Ctrl-B to configure iPXE (PCI 00:02.0)...                                                                               
+
+
+Booting from ROM..[0.139652] NET: no network interface found
+QUAL start mode=qualify go=go1.27.4 arch=linux/amd64 gomaxprocs=1 dir=/data
+QUAL wal-file PASS write/sync/reopen/snapshot/reclaim verified
+QUAL wal-block PASS write/sync/reopen/snapshot/reclaim verified
+QUAL locking PASS advisory lock acquired (not an ownership fence)
+QUAL fssub-flush PASS write+fsync+reopen verified (WAL durable receipt)
+QUAL fssub-rename PASS write+fsync+rename-over verified (atomic publication)
+QUAL fssub-dirsync PASS directory fsync accepted
+QUAL fssub-create-remove PASS create+remove verified
+QUAL single-voter PASS 100 commits in 223.91497ms, restart-to-leader 2.931885ms
+QUAL cluster PASS 3-voter in-guest commit + read barrier verified
+QUAL resources PASS heapAlloc=10046560 heapSys=12288000 numGC=4
+QUAL DONE
