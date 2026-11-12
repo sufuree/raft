@@ -212,3 +212,31 @@ not the pinned QEMU/KVM receipt.
   the §11 crash model.
 - The qualify program runs identically on Linux and Nanos (cmd/qualify);
   scripts/nanos-crash-test*.sh orchestrate the two-phase crash test.
+
+## Known limitations (non-blocking, recorded for release honesty)
+
+A headless code review of the release PR (three passes) confirmed the §11
+evidence and surfaced the following defense-in-depth gaps. None is a safety
+defect or a release blocker; each is recorded rather than silently left:
+
+- **Adapter epoch is not persisted.** `wal.Load`/`MemStorage.Load` return
+  `Epoch == 0`, so the driver computes epoch 1 on every reopen (§5 intends an
+  increment per restart). Stale-completion rejection currently rests on each
+  runtime instance owning fresh event channels and work-ID maps, which the
+  single-owner driver guarantees; the epoch is a secondary guard not yet
+  realized end-to-end in the reference adapters.
+- **`DurableIndex` does not decrease on suffix replacement.** `onPersisted`
+  only advances it, so after an uncommitted truncation it can overstate the
+  recoverable prefix until re-appended. Dispatch remains safe (gated on
+  `PersistedCommitIndex` and the ordered store loop); §7 permits the decrease
+  and a clamp at truncation-persist completion is future work.
+- **Immediate append-ack under a new term.** The first append-ack after term
+  adoption can be sent (`After == 0`) while the entries' persist is still in
+  flight; it asserts only the already-durable prefix, and commitment requires a
+  current-term durable entry. Vote grants and candidate messages are gated on
+  hard-state persistence. This is the same durability class as the
+  `DurableIndex` item and is pre-existing.
+
+These are tracked as future hardening, not qualifications claimed. The
+conservative §6.2 dispatch optimization and leader append coalescing (the
+throughput gap in the benchmark report) likewise remain gated future work.
