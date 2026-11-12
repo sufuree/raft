@@ -71,6 +71,18 @@ type Config struct {
 	MaxSnapshotBytes int
 	// SnapshotChunkBytes bounds one streamed snapshot chunk (§6.4).
 	SnapshotChunkBytes int
+
+	// OnStore, when set, observes each ordered storage operation's wall
+	// duration (§8 metrics): op "save" covers write+sync of one persistence
+	// batch; op "applied" covers the applied-watermark update. It runs on the
+	// storage goroutine, never on the event loop, and must not block. It is
+	// observability only: protocol decisions never depend on it (§5).
+	OnStore func(op string, d time.Duration)
+	// OnApply, when set, observes each FSM apply batch with the dispatch →
+	// FSM-completion duration (§8, §11 apply-latency reporting). It runs on an
+	// apply worker, never on the event loop, and must not block. It is
+	// observability only: protocol decisions never depend on it (§5).
+	OnApply func(entries int, d time.Duration)
 }
 
 func (c *Config) setDefaults() {
@@ -366,10 +378,16 @@ func (d *Driver) storeLoop() {
 			return
 		case j := <-d.storeCh:
 			var err error
+			start := time.Now()
+			op := "save"
 			if j.save != nil {
 				err = d.store.Save(*j.save)
 			} else {
+				op = "applied"
 				err = d.store.MarkApplied(j.applied)
+			}
+			if d.cfg.OnStore != nil {
+				d.cfg.OnStore(op, time.Since(start))
 			}
 			if j.reply != nil {
 				j.reply <- err
@@ -478,11 +496,16 @@ func (d *Driver) dispatch(w raft.Work) {
 	case <-d.stop:
 		return
 	}
+	dispatched := time.Now()
 	go func() {
 		defer func() { <-d.sem }()
 		switch w.Kind {
 		case raft.WorkApply:
-			if err := d.fsm.Apply(w.Apply); err != nil {
+			err := d.fsm.Apply(w.Apply)
+			if d.cfg.OnApply != nil {
+				d.cfg.OnApply(len(w.Apply), time.Since(dispatched))
+			}
+			if err != nil {
 				d.postCompletion(raft.Event{Kind: raft.EvApplyFailed, Epoch: w.Epoch, WorkID: w.ID, Err: err})
 				return
 			}
