@@ -108,7 +108,11 @@ run_kvm() {
   local qpid=$!
   local peak=0
   while kill -0 "$qpid" 2>/dev/null; do
-    local rss=$(ps -o rss= -p "$qpid" 2>/dev/null | tr -d ' ')
+    # $qpid is the timeout wrapper; sample its QEMU child for guest-total RSS
+    # (all guest memory — heap, mappings, kernel cache — lives in QEMU's RSS).
+    local cpid=$(pgrep -P "$qpid" 2>/dev/null | head -1)
+    [ -z "$cpid" ] && cpid=$qpid
+    local rss=$(ps -o rss= -p "$cpid" 2>/dev/null | tr -d ' ')
     [ -n "$rss" ] && [ "$rss" -gt "$peak" ] && peak=$rss
     sleep 1
   done
