@@ -25,7 +25,7 @@ status, not claims.
 | Client uncertainty | passing | structured outcomes; lost replies never imply rollback |
 | Resource bounds | passing | byte budgets, typed overload, bounded decode, in-flight append window, streamed snapshots |
 | Bootstrap/recovery | passing | creation/restart/disaster-recovery discipline, generation checks, fencing acknowledgement |
-| Platform support | in progress | Nanos unikernel suite passing under QEMU (TCG dev loop); pinned QEMU/KVM receipt and Linux reference in qualification |
+| Platform support | in progress | Linux reference (x86_64 + arm64, EBS) passing; Nanos unikernel suite + power-loss passing under QEMU/TCG on macOS and Linux; pinned QEMU/KVM receipt pending bare-metal availability ([receipt](docs/qualification/receipt.md)) |
 | Consumer contract | passing | API docs distinguish consensus completion from external execution |
 
 Comparative benchmarks against pinned HashiCorp Raft + bbolt and etcd Raft

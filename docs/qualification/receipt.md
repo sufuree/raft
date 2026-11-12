@@ -55,6 +55,14 @@ Guest: 1 vCPU, 512 MiB. Volume: 128 MiB ops volume (TFS), virtio-blk.
 | Nanos QEMU/TCG power-loss crash test | PASS — kill -9 QEMU, reboot same volume: durable prefix intact, unsynced tail discarded |
 | Comparative benchmarks (EBS gp3, GOMAXPROCS=1) | recorded in [../benchmarks/report.md](../benchmarks/report.md) |
 
+## Resource teardown (verified)
+
+All qualification resources were torn down and verified: both instances
+`terminated`, transfer bucket 404, IAM role and instance profile
+`NoSuchEntity`, security group deleted, no `project=raft-qual` instances
+remaining. The vCPU quota increase request (for a future bare-metal KVM run)
+remains open with AWS support; it creates no resources by itself.
+
 ## KVM gate (pending)
 
 The RFC pins QEMU/KVM. Neither c7i.large nor m8g.large exposes nested
