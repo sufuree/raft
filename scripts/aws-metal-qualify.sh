@@ -21,8 +21,9 @@ cd /root
 curl -sL https://go.dev/dl/go1.27.4.linux-$GOARCH.tar.gz -o go.tar.gz
 tar -C /usr/local -xzf go.tar.gz
 go version
-if [ "$GOARCH" = "arm64" ]; then OPS_ARCH=aarch64; else OPS_ARCH=x86_64; fi
-curl -sSfL "https://storage.googleapis.com/cli/linux/$OPS_ARCH/ops" -o /usr/local/bin/ops || exit 1
+# ops distribution: x86_64 lives at /linux/ops; aarch64 at /linux/aarch64/ops.
+if [ "$GOARCH" = "arm64" ]; then OPS_URL="https://storage.googleapis.com/cli/linux/aarch64/ops"; else OPS_URL="https://storage.googleapis.com/cli/linux/ops"; fi
+curl -sSfL "$OPS_URL" -o /usr/local/bin/ops || exit 1
 chmod +x /usr/local/bin/ops
 ops version || true
 
