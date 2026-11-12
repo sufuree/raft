@@ -546,7 +546,11 @@ func TestLargeSnapshotStreamedCatchUp(t *testing.T) {
 		fsm := newTestFSM()
 		d, err := New(Config{
 			ID: id, ElectionTick: 10, HeartbeatTick: 2, PreVote: true, CheckQuorum: true,
-			Seed: int64(id) * 100, TickInterval: time.Millisecond,
+			// 5 ms cadence (50 ms election timeout): 1 ms ticks (10 ms timeout)
+			// are overshot by -race scheduling jitter on many-core hosts,
+			// causing spurious CheckQuorum step-downs mid-propose. The library
+			// targets single-vCPU cadence; this matches the qualify profile.
+			Seed: int64(id) * 100, TickInterval: 5 * time.Millisecond,
 			SnapshotChunkBytes: 4 << 10, StagingDir: stagingDir,
 			MaxBatchBytes: 32 << 10, MaxCommandBytes: 16 << 10,
 		}, store, fsm, net.NewTransport(id))
@@ -642,7 +646,7 @@ func TestLargeSnapshotStreamedCatchUp(t *testing.T) {
 	fsm := newTestFSM()
 	d, err := New(Config{
 		ID: lag.d.cfg.ID, ElectionTick: 10, HeartbeatTick: 2, PreVote: true, CheckQuorum: true,
-		Seed: 999, TickInterval: time.Millisecond,
+		Seed: 999, TickInterval: 5 * time.Millisecond,
 		SnapshotChunkBytes: 4 << 10, StagingDir: stagingDir,
 		MaxBatchBytes: 32 << 10, MaxCommandBytes: 16 << 10,
 	}, store, fsm, net.NewTransport(lag.d.cfg.ID))
