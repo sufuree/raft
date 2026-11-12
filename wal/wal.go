@@ -184,7 +184,9 @@ func (w *WAL) recover() error {
 	// exact SegmentSize the store was written with, not the caller's option
 	// (spec §7 — silent reinterpretation is forbidden).
 	storedSeg := int64(binary.BigEndian.Uint64(sb[segSizeOff : segSizeOff+8]))
-	if storedSeg < superSize {
+	// Sanity bound: a grid below the superblock or absurdly large is corrupt
+	// (the upper bound also keeps the int conversion below safe on 32-bit).
+	if storedSeg < superSize || storedSeg > 1<<40 {
 		return fmt.Errorf("%w: bad persisted segment size %d", ErrCorrupt, storedSeg)
 	}
 	w.opts.SegmentSize = storedSeg

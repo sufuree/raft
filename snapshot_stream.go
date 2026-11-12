@@ -116,6 +116,13 @@ func (c *Core) onSnapshotStaged(ev Event) {
 	}
 	// Complete: install through the ordinary accounting. The payload resolves
 	// from staging and is verified end-to-end before publication (§6.4).
+	if c.installingSnapshot != nil {
+		// An install is already pending or in progress: a re-stream completing
+		// now must not overwrite the deferred pendingInstall (orphaning its
+		// pending-work entry). Drop the redundant staging; the install acks.
+		c.staging = nil
+		return
+	}
 	meta := st.meta
 	c.staging = nil
 	c.installingSnapshot = &meta

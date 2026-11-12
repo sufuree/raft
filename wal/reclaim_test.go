@@ -2,6 +2,7 @@ package wal
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"hash/crc32"
@@ -468,19 +469,31 @@ func TestBoundedGrowth(t *testing.T) {
 }
 
 // TestSuperblockConfigSurvivesCheckpointFlip: the persisted InitialConfig must
-// not overlap the checkpoint slots. A config near the bound, followed by a
-// snapshot publication (which flips a checkpoint slot), must reopen with the
-// same config (B-1 regression: the v3 config bound previously allowed overlap
-// with slot A at 512, silently corrupting the config on the first flip).
+// not overlap the checkpoint slots (B-1). Builds a config right at the bound,
+// verifies an oversized config is rejected, and — after a snapshot publication
+// flips a checkpoint slot — decodes the SUPERBLOCK config bytes directly (not
+// the snapshot record, which would mask superblock corruption).
 func TestSuperblockConfigSurvivesCheckpointFlip(t *testing.T) {
-	// Build a config whose encoding is large but within the slotAOff-36 bound.
-	var learners raft.NodeSet
-	for i := 0; i < 50; i++ {
-		learners = append(learners, raft.NodeID(1000+i))
+	// Grow a config to the largest encoding that fits before slot A.
+	mk := func(n int) raft.Configuration {
+		learners := make(raft.NodeSet, n)
+		for i := range learners {
+			learners[i] = raft.NodeID(1000 + i) // 2-byte uvarints
+		}
+		return raft.Configuration{Voters: raft.NodeSet{1}, Learners: learners}
 	}
-	cfg := raft.Configuration{Voters: raft.NodeSet{1}, Learners: learners}
-	if n := len(raft.EncodeConfig(cfg)); n > slotAOff-36 {
-		t.Fatalf("test config too large: %d", n)
+	n := 1
+	for len(raft.EncodeConfig(mk(n+1))) <= slotAOff-36 {
+		n++
+	}
+	cfg := mk(n) // largest fitting config
+	cfgLen := len(raft.EncodeConfig(cfg))
+	if cfgLen <= slotAOff-36-64 {
+		t.Fatalf("test config not near the bound: %d bytes (bound %d)", cfgLen, slotAOff-36)
+	}
+	// An oversized config must be rejected at creation, not silently overlap.
+	if _, err := Open(NewMemDevice(), func() Options { o := testOpts(); o.InitialConfig = mk(n + 1); return o }()); err == nil {
+		t.Fatalf("oversized config (%d bytes) accepted; want rejection", len(raft.EncodeConfig(mk(n+1))))
 	}
 	dev := NewMemDevice()
 	opts := testOpts()
@@ -496,22 +509,28 @@ func TestSuperblockConfigSurvivesCheckpointFlip(t *testing.T) {
 		t.Fatal(err)
 	}
 	w.Close()
+	// Decode the superblock config bytes directly: a checkpoint-slot flip must
+	// not have overwritten them.
+	sbLen := int(binary.BigEndian.Uint32(dev.data[32:36]))
+	if sbLen != cfgLen {
+		t.Fatalf("superblock config length changed: %d, want %d", sbLen, cfgLen)
+	}
+	got, err := raft.DecodeConfig(dev.data[36 : 36+sbLen])
+	if err != nil {
+		t.Fatalf("superblock config decode after flip: %v", err)
+	}
+	if len(got.Learners) != n || len(got.Voters) != 1 || got.Voters[0] != 1 {
+		t.Fatalf("superblock config corrupted by flip: voters=%v learners=%d want %d", got.Voters, len(got.Learners), n)
+	}
+	for i := 0; i < n; i++ {
+		if got.Learners[i] != raft.NodeID(1000+i) {
+			t.Fatalf("superblock learner %d corrupted: %d", i, got.Learners[i])
+		}
+	}
+	// And the store reopens cleanly.
 	w2, err := Open(dev, opts)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
-	defer w2.Close()
-	st, err := w2.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := st.Snapshot.Config
-	if len(got.Learners) != len(learners) || len(got.Voters) != 1 || got.Voters[0] != 1 {
-		t.Fatalf("config corrupted by checkpoint flip: voters=%v learners=%d", got.Voters, len(got.Learners))
-	}
-	for i, id := range learners {
-		if got.Learners[i] != id {
-			t.Fatalf("learner %d corrupted: %d != %d", i, got.Learners[i], id)
-		}
-	}
+	w2.Close()
 }
