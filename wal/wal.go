@@ -68,6 +68,14 @@ func (o *Options) setDefaults() {
 	if o.SegmentSize < superSize {
 		o.SegmentSize = superSize
 	}
+	// A batch must fit a segment: the record check rejects any record larger
+	// than SegmentSize, so a MaxBatchBytes above SegmentSize would let the
+	// driver/leader build a batch (e.g. a coalesced catch-up append) that the
+	// WAL then rejects, terminally failing the node (§6.2). Keep the segment at
+	// least as large as the largest allowed batch (§8 limit chain).
+	if o.SegmentSize < int64(o.MaxBatchBytes) {
+		o.SegmentSize = int64(o.MaxBatchBytes)
+	}
 	if o.MaxSnapshotBytes <= 0 {
 		o.MaxSnapshotBytes = 64 << 20
 	}
