@@ -4,9 +4,12 @@
 //
 // Modes:
 //
-//	qualify            run the full in-guest suite
-//	qualify crashwrite write durable + unsynced state, then hang (host kills)
+//	qualify             run the full in-guest suite
+//	qualify crashwrite  write durable + unsynced state, then hang (host kills)
 //	qualify crashverify verify recovery after the host killed the guest
+//	qualify bench       single-voter unikernel benchmark profiles (serial JSON)
+//	qualify idle        idle with no traffic while the host samples VMM CPU
+//	qualify fssubstrate record filesystem flush/rename/locking behavior (§6.3)
 package main
 
 import (
@@ -58,6 +61,12 @@ func main() {
 		crashWrite()
 	case "crashverify":
 		crashVerify()
+	case "bench":
+		runBench()
+	case "idle":
+		runIdle()
+	case "fssubstrate":
+		fsSubstrate()
 	default:
 		// Clean prior suite artifacts for a fresh qualification run.
 		for _, f := range []string{"file.wal", "block.wal", "lock"} {
@@ -176,6 +185,9 @@ func full() {
 	} else {
 		report("locking", err, "")
 	}
+
+	// Filesystem-substrate primitives (§6.3): flush/rename/dir-sync/create-remove.
+	fsSubstrate()
 
 	// Single-voter driver profile: propose/read/snapshot/restart timing.
 	singleVoter()
