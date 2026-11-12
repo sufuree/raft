@@ -1,0 +1,23 @@
+=== PLATFORM PINS ===
+go version go1.27.4 linux/amd64
+Linux ip-172-31-17-209.us-west-1.compute.internal 6.1.190-237.431.amzn2023.x86_64 #1 SMP PREEMPT_DYNAMIC Tue Nov  3 03:51:03 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+QEMU emulator version 11.0.0 (qemu-11.0.0-4.amzn2023)
+Ops version: 0.1.47
+Nanos version: 0.0
+NAME="Amazon Linux"
+VERSION="2023"
+0.1.56
+common
+common.tar.gz
+composes
+crossbuild
+images
+instances
+local_packages
+manifests
+networks
+96
+               total        used        free      shared  buff/cache   available
+Mem:          193023         818      190299          10        1905      190636
+Swap:              0           0           0
+model name	: Intel(R) Xeon(R) Platinum 8488C

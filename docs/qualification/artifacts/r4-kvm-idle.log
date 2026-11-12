@@ -1,0 +1,13 @@
+c[?7l[2J[0mSeaBIOS (version 1.17.0-1.amzn2023)
+
+
+iPXE (http://ipxe.org) 00:02.0 CA00 PCI2.10 PnP PMM+1EFD3CC0+1EF33CC0 CA00
+Press Ctrl-B to configure iPXE (PCI 00:02.0)...                                                                               
+
+
+Booting from ROM..[0.116303] NET: no network interface found
+QUAL start mode=idle go=go1.27.4 arch=linux/amd64 gomaxprocs=1 dir=/data
+QUAL idle BEGIN seconds=60
+QUAL idle END heapAlloc=3759336 heapSys=8093696 sys=12081416 numGC=1 goroutines=3
+QUAL idle PASS idled 60s with no client traffic
+QUAL DONE

@@ -1,0 +1,34 @@
+c[?7l[2J[0mSeaBIOS (version 1.17.0-1.amzn2023)
+
+
+iPXE (http://ipxe.org) 00:02.0 CA00 PCI2.10 PnP PMM+1EFD3CC0+1EF33CC0 CA00
+Press Ctrl-B to configure iPXE (PCI 00:02.0)...                                                                               
+
+
+Booting from ROM..[0.113291] NET: no network interface found
+PROBE start go=go1.27.4 arch=linux/amd64 dir=/data/bboltprobe
+PROBE open-flock-mmap PASS bolt.Open ok in 2.379718ms
+PROBE write-fsync PASS bucket create + 1 KiB put + commit ok
+PROBE mmap-growth PASS 1000 puts (mmap remap) ok in 14.770535ms
+PROBE read-view PASS read 1000 keys ok
+PROBE reopen-flock PASS close + reopen ok
+PROBE raft-boltstore PASS raft-boltdb NewBoltStore ok
+2026-11-12T04:31:58.041Z [INFO]  raft: initial configuration: index=0 servers=[]
+PROBE raft-new PASS HashiCorp NewRaft ok
+2026-11-12T04:31:58.042Z [INFO]  raft: entering follower state: follower="Node at 1 [Follower]" leader-address= leader-id=
+2026-11-12T04:31:58.119Z [WARN]  raft: heartbeat timeout reached, starting election: last-leader-addr= last-leader-id=
+2026-11-12T04:31:58.120Z [INFO]  raft: entering candidate state: node="Node at 1 [Candidate]" term=2
+2026-11-12T04:31:58.121Z [DEBUG] raft: pre-voting for self: term=2 id=1
+2026-11-12T04:31:58.122Z [DEBUG] raft: calculated votes needed: needed=1 term=2
+2026-11-12T04:31:58.122Z [DEBUG] raft: pre-vote received: from=1 term=2 tally=0
+2026-11-12T04:31:58.123Z [DEBUG] raft: pre-vote granted: from=1 term=2 tally=1
+2026-11-12T04:31:58.124Z [INFO]  raft: pre-vote successful, starting election: term=2 tally=1 refused=0 votesNeeded=1
+2026-11-12T04:31:58.127Z [DEBUG] raft: voting for self: term=2 id=1
+2026-11-12T04:31:58.131Z [DEBUG] raft: vote granted: from=1 term=2 tally=1
+2026-11-12T04:31:58.132Z [INFO]  raft: election won: term=2 tally=1
+2026-11-12T04:31:58.133Z [INFO]  raft: entering leader state: leader="Node at 1 [Leader]"
+PROBE raft-leader PASS single voter elected
+PROBE raft-apply PASS 100 commits in 253.946271ms
+PROBE raft-barrier PASS read barrier ok
+PROBE raft-shutdown PASS shutdown ok
+PROBE DONE

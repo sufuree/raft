@@ -1,0 +1,16 @@
+c[?7l[2J[0mSeaBIOS (version 1.17.0-1.amzn2023)
+
+
+iPXE (http://ipxe.org) 00:02.0 CA00 PCI2.10 PnP PMM+1EFD3CC0+1EF33CC0 CA00
+Press Ctrl-B to configure iPXE (PCI 00:02.0)...                                                                               
+
+
+Booting from ROM..[0.111892] NET: no network interface found
+QUAL start mode=bench go=go1.27.4 arch=linux/amd64 gomaxprocs=1 dir=/data
+QUALBENCH {"profile":"P1","ops":19327,"errors":0,"p50_ms":3.071,"p95_ms":3.226,"p99_ms":4.171,"ops_sec":322.1029535253123,"heap_mb":0.05745697021484375,"sys_mb":20.158470153808594,"fsync_p50_ms":0,"fsync_p99_ms":0,"store_p50_ms":1.016,"store_p99_ms":1.296,"apply_p50_ms":0,"apply_p99_ms":0.006}
+QUALBENCH {"profile":"P2","ops":1000,"errors":0,"p50_ms":3.07,"p95_ms":3.229,"p99_ms":3.998,"ops_sec":323.34028790007125,"heap_mb":0.06638336181640625,"sys_mb":20.158470153808594,"fsync_p50_ms":0,"fsync_p99_ms":0,"store_p50_ms":1.018,"store_p99_ms":1.144,"apply_p50_ms":0,"apply_p99_ms":0.001}
+QUALBENCH {"profile":"P4","ops":30,"errors":0,"p50_ms":22.82,"p95_ms":28.038,"p99_ms":30.262,"ops_sec":0.999548289634464,"heap_mb":0.06638336181640625,"sys_mb":68.1584701538086,"fsync_p50_ms":0,"fsync_p99_ms":0,"store_p50_ms":0.743,"store_p99_ms":28.847,"apply_p50_ms":0.001,"apply_p99_ms":0.002,"archive_mb":8}
+QUALBENCH {"profile":"P4","ops":30,"errors":0,"p50_ms":78.028,"p95_ms":91.39,"p99_ms":95.075,"ops_sec":0.9995423502058962,"heap_mb":0.06610870361328125,"sys_mb":212.35773468017578,"fsync_p50_ms":0,"fsync_p99_ms":0,"store_p50_ms":0.706,"store_p99_ms":93.91,"apply_p50_ms":0.001,"apply_p99_ms":0.007,"archive_mb":32}
+QUALBENCH {"profile":"P8","ops":24750,"errors":0,"p50_ms":78.587,"p95_ms":108.83,"p99_ms":127.296,"ops_sec":412.31526885765527,"heap_mb":0.10709381103515625,"sys_mb":212.85773468017578,"fsync_p50_ms":0,"fsync_p99_ms":0,"store_p50_ms":0.997,"store_p99_ms":1.219,"apply_p50_ms":0.04,"apply_p99_ms":20.711}
+QUALBENCH {"profile":"P7","ops":1,"errors":0,"p50_ms":0,"p95_ms":0,"p99_ms":0,"ops_sec":0,"heap_mb":0.10680389404296875,"sys_mb":277.17415618896484,"fsync_p50_ms":0,"fsync_p99_ms":0,"store_p50_ms":0.996,"store_p99_ms":2.033,"apply_p50_ms":0.002,"apply_p99_ms":18.259,"restart_ms":212.696,"integrity_ok":true}
+QUAL DONE
