@@ -282,7 +282,11 @@ func (c *Core) handleSnapshot(m Message) {
 	}
 	c.installingSnapshot = &snap
 	id := c.newWork(WorkSnapshotInstall, pendingWork{snapshot: snap})
-	c.out.work(Work{ID: id, Epoch: c.epoch, Kind: WorkSnapshotInstall, Snapshot: snap})
+	w := Work{ID: id, Epoch: c.epoch, Kind: WorkSnapshotInstall, Snapshot: snap}
+	// Defer until any in-flight FSM work completes so Restore never races an
+	// Apply (§6.4); installingSnapshot already blocks new dispatch.
+	c.pendingInstall = &w
+	c.maybeFSM()
 }
 
 func (c *Core) handleSnapshotResp(m Message) {

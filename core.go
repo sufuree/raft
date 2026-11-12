@@ -164,6 +164,16 @@ type Core struct {
 
 	// Snapshot install in progress.
 	installingSnapshot *SnapshotMeta
+	// fsmBusy serializes FSM-touching work (§7 ordered application, §6.4
+	// serialized install/capture): at most one Apply, SnapshotCreate, or
+	// SnapshotInstall is outstanding at a time, so Apply calls complete in
+	// index order, a capture runs at the exact applied index (no apply pending),
+	// and an install never races an in-flight Apply.
+	fsmBusy bool
+	// snapshotRequested defers a capture until the FSM is idle (§6.4).
+	snapshotRequested bool
+	// pendingInstall defers an install until the in-flight FSM work completes.
+	pendingInstall *Work
 	// staging tracks an inbound streamed snapshot (§6.4).
 	staging *snapshotStaging
 	// snapCRC caches the end-to-end checksum of the current snapshot data.
@@ -358,7 +368,7 @@ func (c *Core) Step(ev Event) Outputs {
 		c.onSnapshotStaged(ev)
 	}
 	if c.role != Failed {
-		c.maybeDispatch()
+		c.maybeFSM()
 		c.flushReads()
 		c.maybeCompleteReads()
 	}
@@ -509,7 +519,7 @@ func (c *Core) onPersisted(ev Event) {
 		c.setCommit(pw.commit)
 	}
 	c.maybeCommit()
-	c.maybeDispatch()
+	c.maybeFSM()
 }
 
 func (c *Core) onApplied(ev Event) {
@@ -521,13 +531,65 @@ func (c *Core) onApplied(ev Event) {
 	if pw.appliedIndex > c.appliedIndex {
 		c.appliedIndex = pw.appliedIndex
 	}
+	c.fsmBusy = false
 	c.resolveProposals()
 	c.maybeCompleteReads()
 }
 
-// maybeDispatch releases committed, durable entries to the FSM (§6.2, §7).
-func (c *Core) maybeDispatch() {
+// maybeFSM dispatches the next unit of FSM-touching work, honoring the
+// single-outstanding invariant (§7, §6.4). A deferred install takes priority
+// (it resets the log floor); then a requested capture (only when no apply is
+// pending, so it pins the exact applied index); then the next ordered apply.
+func (c *Core) maybeFSM() {
+	if c.fsmBusy {
+		return
+	}
+	if c.pendingInstall != nil {
+		w := *c.pendingInstall
+		c.pendingInstall = nil
+		c.fsmBusy = true
+		c.out.work(w)
+		return
+	}
 	if c.installingSnapshot != nil {
+		return
+	}
+	if c.snapshotRequested {
+		c.maybeCaptureSnapshot()
+		if c.fsmBusy {
+			return
+		}
+	}
+	c.maybeDispatch()
+}
+
+// maybeCaptureSnapshot captures an FSM view at the exact applied index (§6.4).
+// It runs only when the FSM is idle, so appliedIndex == dispatchedIndex and the
+// captured data cannot reflect entries beyond the recorded index.
+func (c *Core) maybeCaptureSnapshot() {
+	if c.fsmBusy || c.installingSnapshot != nil || !c.snapshotRequested {
+		return
+	}
+	if c.appliedIndex <= c.log.snapshot.Index {
+		c.snapshotRequested = false // nothing new to capture
+		return
+	}
+	c.snapshotRequested = false
+	snap := SnapshotMeta{
+		Index:  c.appliedIndex,
+		Term:   c.log.term(c.appliedIndex),
+		Config: c.config.Clone(),
+	}
+	id := c.newWork(WorkSnapshotCreate, pendingWork{snapshot: snap})
+	c.fsmBusy = true
+	c.out.work(Work{ID: id, Epoch: c.epoch, Kind: WorkSnapshotCreate, Snapshot: snap})
+}
+
+// maybeDispatch releases committed, durable entries to the FSM (§6.2, §7).
+// Only one apply batch is outstanding at a time (fsmBusy): the next batch is
+// dispatched after the previous completes, so FSM application is ordered.
+func (c *Core) maybeDispatch() {
+	if c.installingSnapshot != nil || c.fsmBusy {
 		return
 	}
 	target := c.persistedCommit
@@ -536,6 +598,7 @@ func (c *Core) maybeDispatch() {
 		id := c.newWork(WorkApply, pendingWork{appliedIndex: target})
 		c.out.work(Work{ID: id, Epoch: c.epoch, Kind: WorkApply, Apply: entries})
 		c.dispatchedIndex = target
+		c.fsmBusy = true
 	}
 }
 

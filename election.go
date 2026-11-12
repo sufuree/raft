@@ -402,6 +402,7 @@ func (c *Core) onSnapshotInstalled(ev Event) {
 		return
 	}
 	delete(c.pending, ev.WorkID)
+	c.fsmBusy = false
 	snap := pw.snapshot
 	c.installingSnapshot = nil
 	// Stale at completion: commitment/application may have advanced past the
@@ -457,6 +458,7 @@ func (c *Core) onSnapshotCreated(ev Event) {
 		return
 	}
 	delete(c.pending, ev.WorkID)
+	c.fsmBusy = false
 	snap := pw.snapshot
 	if !ev.Snapshot.Empty() {
 		snap = ev.Snapshot
@@ -496,16 +498,10 @@ func (c *Core) RequestSnapshot() Outputs {
 }
 
 func (c *Core) requestSnapshot() {
-	if c.appliedIndex <= c.log.snapshot.Index {
-		return
-	}
-	snap := SnapshotMeta{
-		Index:  c.appliedIndex,
-		Term:   c.log.term(c.appliedIndex),
-		Config: c.config.Clone(),
-	}
-	id := c.newWork(WorkSnapshotCreate, pendingWork{snapshot: snap})
-	c.out.work(Work{ID: id, Epoch: c.epoch, Kind: WorkSnapshotCreate, Snapshot: snap})
+	// Defer the capture until the FSM is idle so it pins the exact applied
+	// index (§6.4); maybeFSM dispatches it once no apply is outstanding.
+	c.snapshotRequested = true
+	c.maybeFSM()
 }
 
 var errSnapshotStale = errors.New("raft: stale snapshot ignored")

@@ -120,10 +120,14 @@ func (c *Core) onSnapshotStaged(ev Event) {
 	c.staging = nil
 	c.installingSnapshot = &meta
 	id := c.newWork(WorkSnapshotInstall, pendingWork{snapshot: meta})
-	c.out.work(Work{
+	w := Work{
 		ID: id, Epoch: c.epoch, Kind: WorkSnapshotInstall, Snapshot: meta,
 		ChunkTotal: st.total, ChunkCRC: st.crc,
-	})
+	}
+	// Defer until any in-flight FSM work completes so Restore never races an
+	// Apply (§6.4).
+	c.pendingInstall = &w
+	c.maybeFSM()
 }
 
 // handleSnapshotChunkAck drives the leader side of the stream: one chunk in
