@@ -152,9 +152,13 @@ type Driver struct {
 	readWait     map[string]chan raft.ReadResult
 	pendingCount int
 	pendingBytes int
-	nextID       uint64
-	failed       bool
-	stopped      bool
+	// pendingSize records each admitted proposal's charged bytes so the budget
+	// is refunded when the core produces its result (§8), independent of whether
+	// the caller is still waiting (cancellation must not leak the charge).
+	pendingSize map[uint64]int
+	nextID      uint64
+	failed      bool
+	stopped     bool
 
 	held    map[uint64][]raft.Message
 	sem     chan struct{}
@@ -203,11 +207,12 @@ func New(cfg Config, store raft.Storage, fsm FSM, tr Transport) (*Driver, error)
 		storeCh:    make(chan storeJob, cfg.MaxInflightWork),
 		compNotify: make(chan struct{}, 1),
 		stop:       make(chan struct{}), done: make(chan struct{}),
-		storeDone: make(chan struct{}),
-		propWait:  make(map[uint64]chan Result),
-		readWait:  make(map[string]chan raft.ReadResult),
-		held:      make(map[uint64][]raft.Message),
-		sem:       make(chan struct{}, cfg.MaxInflightWork),
+		storeDone:   make(chan struct{}),
+		propWait:    make(map[uint64]chan Result),
+		readWait:    make(map[string]chan raft.ReadResult),
+		pendingSize: make(map[uint64]int),
+		held:        make(map[uint64][]raft.Message),
+		sem:         make(chan struct{}, cfg.MaxInflightWork),
 	}
 	// Remove orphaned staging files from prior instances (§6.4): interrupted
 	// transfers never become snapshots.
@@ -453,7 +458,12 @@ func (d *Driver) handle(out raft.Outputs) {
 		d.mu.Lock()
 		ch := d.propWait[p.ID]
 		delete(d.propWait, p.ID)
+		// Refund the admission charge when the result is produced (§8), whether
+		// or not the caller is still waiting; cancellation only removes the
+		// waiter and must not leak the budget.
 		d.pendingCount--
+		d.pendingBytes -= d.pendingSize[p.ID]
+		delete(d.pendingSize, p.ID)
 		d.mu.Unlock()
 		if ch != nil {
 			ch <- Result{Outcome: p.Outcome, Index: p.Index, Term: p.Term}
@@ -604,6 +614,7 @@ func (d *Driver) Propose(ctx context.Context, data []byte) (Result, error) {
 	d.propWait[id] = ch
 	d.pendingCount++
 	d.pendingBytes += len(data)
+	d.pendingSize[id] = len(data)
 	d.mu.Unlock()
 
 	d.post(raft.Event{Kind: raft.EvPropose, WorkID: id, Data: data})
@@ -615,9 +626,8 @@ func (d *Driver) Propose(ctx context.Context, data []byte) (Result, error) {
 		// Cancellation stops waiting; the command may still have been admitted.
 		return Result{Outcome: raft.OutcomeUnknown}, ctx.Err()
 	case r := <-ch:
-		d.mu.Lock()
-		d.pendingBytes -= len(data)
-		d.mu.Unlock()
+		// The admission charge was refunded when the core produced this result
+		// (handle); nothing to release here.
 		if r.Outcome == raft.OutcomeRejected {
 			return r, ErrNotLeader
 		}
@@ -671,19 +681,32 @@ func (d *Driver) Read(ctx context.Context) (raft.Index, error) {
 
 // ConfChange proposes a membership transition.
 func (d *Driver) ConfChange(ctx context.Context, target raft.Configuration) (Result, error) {
+	sz := len(raft.EncodeConfig(target))
 	d.mu.Lock()
 	if d.failed || d.stopped {
 		d.mu.Unlock()
 		return Result{}, ErrFailed
 	}
+	// A membership transition is a pending proposal too: charge the same
+	// admission budget so handle's per-result refund stays balanced (§8).
+	if d.pendingCount >= d.cfg.MaxPendingProposals || d.pendingBytes+sz > d.cfg.MaxPendingBytes {
+		d.mu.Unlock()
+		return Result{}, ErrOverload
+	}
 	d.nextID++
 	id := d.nextID
 	ch := make(chan Result, 1)
 	d.propWait[id] = ch
+	d.pendingCount++
+	d.pendingBytes += sz
+	d.pendingSize[id] = sz
 	d.mu.Unlock()
 	d.post(raft.Event{Kind: raft.EvProposeConfChange, WorkID: id, Config: target})
 	select {
 	case <-ctx.Done():
+		d.mu.Lock()
+		delete(d.propWait, id)
+		d.mu.Unlock()
 		return Result{Outcome: raft.OutcomeUnknown}, ctx.Err()
 	case r := <-ch:
 		if r.Outcome == raft.OutcomeRejected {
