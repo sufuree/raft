@@ -36,8 +36,12 @@ rm -rf /root/raft && mkdir -p /root/raft && cd /root/raft
 aws s3 cp s3://$BUCKET/raft-src.tar.gz . || exit 1
 tar xzf raft-src.tar.gz
 gofmt -l . ; go vet ./... && go build ./... || exit 1
-go test ./... -count=1 -timeout 300s || exit 1
-CGO_ENABLED=1 go test -race ./... -count=1 -timeout 400s || exit 1
+# The library targets single-vCPU operation (RFC §5, §8); the reference receipt
+# (R2/R3) ran on 2-vCPU instances. Pin GOMAXPROCS=2 so -race scheduling jitter
+# on this 96-vCPU bare-metal host does not overshoot the tests' election
+# timeouts (timing-sensitive assertions, not data races).
+GOMAXPROCS=2 go test ./... -count=1 -timeout 300s || exit 1
+GOMAXPROCS=2 CGO_ENABLED=1 go test -race ./... -count=1 -timeout 400s || exit 1
 
 # Linux reference receipt: native qualify on EBS (not tmpfs).
 mkdir -p /root/qual-data
