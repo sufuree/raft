@@ -43,6 +43,10 @@ func newEtcdStorage(dir string, id uint64, k knobs) (*etcdStorage, error) {
 		ClusterID: 2, MemberID: id, Generation: 1,
 		InitialConfig:    raft.Configuration{Voters: voterSet(k.voters)},
 		MaxSnapshotBytes: maxInt(64<<20, 2*k.stateBytes),
+		// etcd coalesces entries into multi-MB Ready batches; segments must be
+		// large enough to hold one batch (the WAL's §8 budget rejects a record
+		// larger than a segment). MaxSizePerMsg is 8 MiB (48 MiB for archive).
+		SegmentSize: 16 << 20,
 	}
 	if k.maxCommand > 1<<20 {
 		o.SegmentSize = 64 << 20

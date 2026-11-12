@@ -180,7 +180,7 @@ func runLagging(cl cluster, leader node, opts cellOpts) profileRun {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if cl.applied(stallID) < target {
-		panic("P5: follower did not catch up after unstall")
+		panic(fmt.Sprintf("P5: follower did not catch up after unstall: leader applied=%d follower applied=%d (target=%d)", cl.applied(1), cl.applied(stallID), target))
 	}
 	pr.extra["recover_sec"] = time.Since(t0).Seconds()
 	return pr
