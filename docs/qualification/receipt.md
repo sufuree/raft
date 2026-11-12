@@ -60,11 +60,15 @@ Guest: 1 vCPU, 512 MiB. Volume: 128 MiB ops volume (TFS), virtio-blk.
 
 ## Resource teardown (verified)
 
-All qualification resources were torn down and verified: both instances
-`terminated`, transfer bucket 404, IAM role and instance profile
+All qualification resources were torn down and verified after each run. R1–R3:
+both instances `terminated`, transfer bucket 404, IAM role and instance profile
 `NoSuchEntity`, security group deleted, no `project=raft-qual` instances
-remaining. The vCPU quota increase request (for a future bare-metal KVM run)
-remains open with AWS support; it creates no resources by itself.
+remaining. R4 (bare metal): the c7i.metal-24xl instance `terminated`, transfer
+bucket 404, IAM role and instance profile `NoSuchEntity`, security group
+`InvalidGroup.NotFound`, no `project=raft-qual` instances in any non-terminal
+state, no `raft-qual-*` buckets or roles remaining. The vCPU quota increase
+(request `b80acde3329847d49871f2f3a28792dfLweDhDId`, 128 vCPU) was approved and
+enabled the R4 bare-metal run; a quota creates no resources by itself.
 
 ## R4 — pinned QEMU/KVM unikernel receipt (bare metal, x86_64)
 
