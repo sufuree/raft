@@ -54,7 +54,7 @@ written with, never the caller's current option.
 | 16 | 8 | member identity |
 | 24 | 8 | storage generation |
 | 32 | 4 | initial configuration length |
-| 36 | n | initial configuration (`raft.EncodeConfig`); n ≤ 988 |
+| 36 | n | initial configuration (`raft.EncodeConfig`); n ≤ 476 (ends before slot A) |
 | 512 | 28 | checkpoint slot A |
 | 768 | 28 | checkpoint slot B |
 | 1024 | 8 | `SegmentSize` (persisted segment grid; authoritative on recovery) |

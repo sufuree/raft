@@ -280,6 +280,12 @@ func (c *Core) handleSnapshot(m Message) {
 		}
 		return
 	}
+	// An install is already pending or in progress: ignore the retransmit so a
+	// deferred pendingInstall is never overwritten (which would orphan its
+	// pending-work entry). The leader retransmits until the install acks.
+	if c.installingSnapshot != nil {
+		return
+	}
 	c.installingSnapshot = &snap
 	id := c.newWork(WorkSnapshotInstall, pendingWork{snapshot: snap})
 	w := Work{ID: id, Epoch: c.epoch, Kind: WorkSnapshotInstall, Snapshot: snap}

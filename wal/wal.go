@@ -167,7 +167,9 @@ func (w *WAL) recover() error {
 		return fmt.Errorf("%w: storage generation regressed", ErrCorrupt)
 	}
 	cfgLen := binary.BigEndian.Uint32(sb[32:36])
-	if int(cfgLen) > segSizeOff-36 {
+	// The config region must end before checkpoint slot A (512); the slots and
+	// the persisted grid are written independently and must not overlap it.
+	if int(cfgLen) > slotAOff-36 {
 		return fmt.Errorf("%w: bad config length", ErrCorrupt)
 	}
 	cfg, err := raft.DecodeConfig(sb[36 : 36+cfgLen])
@@ -186,6 +188,12 @@ func (w *WAL) recover() error {
 		return fmt.Errorf("%w: bad persisted segment size %d", ErrCorrupt, storedSeg)
 	}
 	w.opts.SegmentSize = storedSeg
+	// The persisted grid is authoritative; a batch must still fit a segment, so
+	// clamp the caller's batch limit to it (§8 limit chain). A driver configured
+	// with a larger batch fails stop on write rather than silently losing data.
+	if int64(w.opts.MaxBatchBytes) > storedSeg {
+		w.opts.MaxBatchBytes = int(storedSeg)
+	}
 
 	// Recovery starts at the published checkpoint; earlier records are dead
 	// space reclaimed by compaction (§6.3).
@@ -432,7 +440,7 @@ func (w *WAL) initSuperblock() error {
 	binary.BigEndian.PutUint64(sb[16:24], w.opts.MemberID)
 	binary.BigEndian.PutUint64(sb[24:32], w.opts.Generation)
 	cfg := raft.EncodeConfig(w.opts.InitialConfig)
-	if len(cfg) > segSizeOff-36 {
+	if len(cfg) > slotAOff-36 {
 		return fmt.Errorf("wal: initial config %d bytes exceeds superblock budget", len(cfg))
 	}
 	binary.BigEndian.PutUint32(sb[32:36], uint32(len(cfg)))

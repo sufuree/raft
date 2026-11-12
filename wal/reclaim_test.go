@@ -466,3 +466,52 @@ func TestBoundedGrowth(t *testing.T) {
 	}
 	_ = crc32.ChecksumIEEE // keep import for corruption tests above
 }
+
+// TestSuperblockConfigSurvivesCheckpointFlip: the persisted InitialConfig must
+// not overlap the checkpoint slots. A config near the bound, followed by a
+// snapshot publication (which flips a checkpoint slot), must reopen with the
+// same config (B-1 regression: the v3 config bound previously allowed overlap
+// with slot A at 512, silently corrupting the config on the first flip).
+func TestSuperblockConfigSurvivesCheckpointFlip(t *testing.T) {
+	// Build a config whose encoding is large but within the slotAOff-36 bound.
+	var learners raft.NodeSet
+	for i := 0; i < 50; i++ {
+		learners = append(learners, raft.NodeID(1000+i))
+	}
+	cfg := raft.Configuration{Voters: raft.NodeSet{1}, Learners: learners}
+	if n := len(raft.EncodeConfig(cfg)); n > slotAOff-36 {
+		t.Fatalf("test config too large: %d", n)
+	}
+	dev := NewMemDevice()
+	opts := testOpts()
+	opts.InitialConfig = cfg
+	w, err := Open(dev, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedEntries(t, w, 10)
+	c := raft.Index(10)
+	snap := raft.SnapshotMeta{Index: 10, Term: 1, Config: cfg, Data: []byte("snapshot")}
+	if err := w.Save(raft.PersistBatch{Snapshot: &snap, Commit: &c}); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	w2, err := Open(dev, opts)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer w2.Close()
+	st, err := w2.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := st.Snapshot.Config
+	if len(got.Learners) != len(learners) || len(got.Voters) != 1 || got.Voters[0] != 1 {
+		t.Fatalf("config corrupted by checkpoint flip: voters=%v learners=%d", got.Voters, len(got.Learners))
+	}
+	for i, id := range learners {
+		if got.Learners[i] != id {
+			t.Fatalf("learner %d corrupted: %d != %d", i, got.Learners[i], id)
+		}
+	}
+}
