@@ -51,7 +51,9 @@ Guest: 1 vCPU, 512 MiB. Volume: 128 MiB ops volume (TFS), virtio-blk.
 | native qualify, /data (EBS) | PASS — 100 commits 563 ms; restart-to-leader 2.9 ms |
 | native qualify, tmp | PASS — 100 commits 1.2 ms; restart 0.9 ms |
 | /dev/kvm | **absent** (Graviton4: "HYP mode not available"; no EL2 exposed) |
-| Nanos QEMU/TCG + comparative benchmarks | pending (run in progress) |
+| Nanos QEMU/TCG full suite (1 vCPU, 512 MiB, virtio-blk volume) | PASS — wal-file, wal-block, locking, single-voter (100 commits 425 ms; restart-to-leader 47.6 ms), 3-voter cluster, resources (heap ~10 MiB) |
+| Nanos QEMU/TCG power-loss crash test | PASS — kill -9 QEMU, reboot same volume: durable prefix intact, unsynced tail discarded |
+| Comparative benchmarks (EBS gp3, GOMAXPROCS=1) | recorded in [../benchmarks/report.md](../benchmarks/report.md) |
 
 ## KVM gate (pending)
 
@@ -64,13 +66,26 @@ metal run completes. Until then the platform gate is **not claimed passed**;
 R1–R3 are real-guest evidence under TCG/native execution, recorded honestly
 as such.
 
+## R3 addendum — Nanos on Linux/TCG
+
+AL2023 QEMU 11.0.0 ships without slirp (user-mode networking); the qualify
+suite uses the in-process LoopNetwork, so the guest runs without a NIC.
+Nanos 0.1.56-arm boots under `-machine virt,gic-version=2 -accel tcg
+-cpu cortex-a72` with virtio-blk root + volume. All in-guest gates and the
+two-phase power-loss test pass (see R3 table). This is QEMU/TCG evidence,
+not the pinned QEMU/KVM receipt.
+
 ## Failure primitives observed
 
 - macOS HVF: GICv2 unsupported → Nanos arm64 cannot boot under HVF. This is a
   host-accelerator limitation, not a Nanos or library incompatibility.
 - No library primitive failures observed on Nanos to date: filesystem
-  writes+fsync, flock, TCP loopback, virtio-blk volumes, and process restart
-  all behave per contract in R1.
+  writes+fsync, flock, in-process transport, virtio-blk volumes, and process
+  restart all behave per contract in R1 and R3.
+- AL2023 QEMU lacks slirp: guest NIC unavailable with `-netdev user`; not a
+  library or Nanos incompatibility (suite needs no external network).
+- HashiCorp Raft v1.8 + bbolt baseline hangs under GOMAXPROCS=1 on EBS in the
+  P7 profile (benchmark finding, not a library failure).
 
 ## Method notes
 
