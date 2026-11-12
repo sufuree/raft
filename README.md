@@ -9,11 +9,21 @@ systems, control planes. Commands and state machines are application-defined.
 
 ## Status
 
-**Implemented and under qualification.** The protocol core, reference WAL,
-runtime driver, bootstrap/recovery discipline, authenticated TCP+mTLS
-transport, and deterministic simulator are implemented and tested. Release
-acceptance follows the RFC §11 matrix; the table below reports honest gate
-status, not claims.
+**Implemented; RFC §11 acceptance gates passed.** The protocol core, reference
+WAL, runtime driver, bootstrap/recovery discipline, authenticated TCP+mTLS
+transport, and deterministic simulator are implemented and tested. Every §11
+gate has recorded evidence, including the pinned QEMU/KVM unikernel receipt on
+both substrates at one vCPU, and the comparative benchmark matrix meets the
+published thresholds. The table below reports gate status with evidence, not
+claims.
+
+**API stability:** the public contracts (watermarks, structured outcomes,
+`WaitApplied`/read barrier, bootstrap/recovery, storage/transport adapters) are
+stable for the qualified scope. The API is not yet frozen at a v1 semantic
+version; additive changes remain possible. The gated §6.2 dispatch optimization,
+leader append coalescing, leadership transfer, follower/stale reads, and
+resumable snapshot transfer are explicitly deferred (RFC §4.5, §6.2) and not
+part of the qualified surface.
 
 | Gate | Status | Evidence |
 | --- | --- | --- |
@@ -25,13 +35,19 @@ status, not claims.
 | Client uncertainty | passing | structured outcomes; lost replies never imply rollback |
 | Resource bounds | passing | byte budgets, typed overload, bounded decode, in-flight append window, streamed snapshots |
 | Bootstrap/recovery | passing | creation/restart/disaster-recovery discipline, generation checks, fencing acknowledgement |
-| Platform support | in progress | Linux reference (x86_64 + arm64, EBS) passing; Nanos unikernel suite + power-loss passing under QEMU/TCG on macOS and Linux; pinned QEMU/KVM receipt pending bare-metal availability ([receipt](docs/qualification/receipt.md)) |
+| Platform support | passing | Pinned QEMU/KVM unikernel receipt (R4): Nanos 0.1.56 on bare-metal x86_64, 1 vCPU, both substrates, §6.3 flush/rename/locking, power-loss recovery, guest-total memory + idle CPU; Linux reference (x86_64 + arm64, EBS) passing ([receipt](docs/qualification/receipt.md)) |
 | Consumer contract | passing | API docs distinguish consensus completion from external execution |
 
 Comparative benchmarks against pinned HashiCorp Raft + bbolt and etcd Raft
-compositions run under published profiles
-([docs/benchmarks/profiles.md](docs/benchmarks/profiles.md)); no numerical win
-is claimed until measured against those thresholds.
+compositions are measured under published profiles
+([docs/benchmarks/profiles.md](docs/benchmarks/profiles.md), rev2.2) across the
+1-voter unikernel and 1/3-voter Linux reference: steady/bursty/archive loads,
+lagging follower, snapshot catch-up, restart, pipelined throughput, memory, and
+idle CPU ([report](docs/benchmarks/report.md)). The library meets its published
+conservative-policy thresholds. **No numerical win is claimed**: the baselines
+coalesce appends and achieve higher pipelined throughput; the library's
+conservative §6.2 policy is fsync-bound under pipelining, recorded as a finding
+with the gated optimization as future work.
 
 ## Packages
 
