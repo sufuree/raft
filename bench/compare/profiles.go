@@ -207,7 +207,11 @@ func runCatchup(cl cluster, leader node) profileRun {
 	pr.lats = append(pr.lats, post.lats...)
 	pr.lats = append(pr.lats, suffix.lats...)
 	target := cl.applied(1)
-	want := cl.checksum(1)
+	// Compare buffer contents, not the applied-bound checksum: the leader's
+	// applied may advance past target via new-leader no-ops (which do not stamp
+	// application state), so the follower at target and the leader at target+k
+	// still hold identical state (same integrity basis as P7).
+	want := cl.stateCRC(1)
 	cl.unstall(stallID)
 	t0 := time.Now()
 	if err := cl.restart(stallID); err != nil {
@@ -221,7 +225,7 @@ func runCatchup(cl cluster, leader node) profileRun {
 		panic("P6: follower did not catch up via snapshot")
 	}
 	pr.extra["catchup_sec"] = time.Since(t0).Seconds()
-	if cl.checksum(stallID) == want {
+	if cl.stateCRC(stallID) == want {
 		pr.extra["integrity"] = 1
 	} else {
 		panic("P6: follower state checksum mismatch after snapshot install")
