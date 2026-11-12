@@ -16,14 +16,20 @@ import (
 )
 
 const (
-	superMagic    = 0x5257414c // "RWAL"
-	recordMagic   = 0x52424154 // "RBAT"
-	formatVersion = 2
-	// formatVersionV1 devices are read and upgraded in place (§6.3).
-	formatVersionV1 = 1
-	superSize       = 4096
-	headerSize      = 17 // magic(4)+len(4)+seq(8)+type(1)
-	crcSize         = 4
+	superMagic  = 0x5257414c // "RWAL"
+	recordMagic = 0x52424154 // "RBAT"
+	// formatVersion 3 persists SegmentSize in the superblock so recovery uses
+	// the exact grid the store was written with. Earlier versions did not
+	// persist it; reopening them with a different SegmentSize would silently
+	// skip live records, so they are rejected with an explicit upgrade error
+	// rather than reinterpreted (spec §7).
+	formatVersion = 3
+	superSize     = 4096
+	// segSizeOff holds the persisted SegmentSize (8 bytes), clear of the
+	// identity/config fields and the checkpoint slots (512, 768).
+	segSizeOff = 1024
+	headerSize = 17 // magic(4)+len(4)+seq(8)+type(1)
+	crcSize    = 4
 
 	typeBatch    = 1
 	typeApplied  = 2
@@ -145,8 +151,8 @@ func (w *WAL) recover() error {
 		return fmt.Errorf("%w: bad superblock magic", ErrCorrupt)
 	}
 	ver := binary.BigEndian.Uint32(sb[4:8])
-	if ver != formatVersion && ver != formatVersionV1 {
-		return fmt.Errorf("%w: unsupported version %d", ErrCorrupt, ver)
+	if ver != formatVersion {
+		return fmt.Errorf("%w: unsupported version %d (format upgrade required)", ErrCorrupt, ver)
 	}
 	cluster := binary.BigEndian.Uint64(sb[8:16])
 	member := binary.BigEndian.Uint64(sb[16:24])
@@ -161,7 +167,7 @@ func (w *WAL) recover() error {
 		return fmt.Errorf("%w: storage generation regressed", ErrCorrupt)
 	}
 	cfgLen := binary.BigEndian.Uint32(sb[32:36])
-	if int(cfgLen) > superSize-40 {
+	if int(cfgLen) > segSizeOff-36 {
 		return fmt.Errorf("%w: bad config length", ErrCorrupt)
 	}
 	cfg, err := raft.DecodeConfig(sb[36 : 36+cfgLen])
@@ -172,6 +178,14 @@ func (w *WAL) recover() error {
 	w.opts.ClusterID = cluster
 	w.opts.MemberID = member
 	w.opts.Generation = gen
+	// The persisted segment grid is authoritative: recovery must scan with the
+	// exact SegmentSize the store was written with, not the caller's option
+	// (spec §7 — silent reinterpretation is forbidden).
+	storedSeg := int64(binary.BigEndian.Uint64(sb[segSizeOff : segSizeOff+8]))
+	if storedSeg < superSize {
+		return fmt.Errorf("%w: bad persisted segment size %d", ErrCorrupt, storedSeg)
+	}
+	w.opts.SegmentSize = storedSeg
 
 	// Recovery starts at the published checkpoint; earlier records are dead
 	// space reclaimed by compaction (§6.3).
@@ -239,17 +253,6 @@ func (w *WAL) recover() error {
 	// Commit metadata must never reference missing entries (§6.1).
 	if w.hs.Commit > w.lastIndex() {
 		return fmt.Errorf("%w: commit %d beyond recoverable log %d", ErrCorrupt, w.hs.Commit, w.lastIndex())
-	}
-	// On-disk upgrade (§6.3): a v1 superblock is rewritten as v2 after a
-	// successful recovery. A crash before this point re-runs v1 recovery.
-	if ver == formatVersionV1 {
-		binary.BigEndian.PutUint32(sb[4:8], formatVersion)
-		if _, err := w.dev.WriteAt(sb, 0); err != nil {
-			return err
-		}
-		if err := w.dev.Sync(); err != nil {
-			return err
-		}
 	}
 	return nil
 }
@@ -429,8 +432,13 @@ func (w *WAL) initSuperblock() error {
 	binary.BigEndian.PutUint64(sb[16:24], w.opts.MemberID)
 	binary.BigEndian.PutUint64(sb[24:32], w.opts.Generation)
 	cfg := raft.EncodeConfig(w.opts.InitialConfig)
+	if len(cfg) > segSizeOff-36 {
+		return fmt.Errorf("wal: initial config %d bytes exceeds superblock budget", len(cfg))
+	}
 	binary.BigEndian.PutUint32(sb[32:36], uint32(len(cfg)))
 	copy(sb[36:], cfg)
+	// Persist the segment grid so recovery never reinterprets it (spec §7).
+	binary.BigEndian.PutUint64(sb[segSizeOff:segSizeOff+8], uint64(w.opts.SegmentSize))
 	if _, err := w.dev.WriteAt(sb, 0); err != nil {
 		return err
 	}

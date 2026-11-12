@@ -1,4 +1,4 @@
-# WAL and manifest format specification, version 2
+# WAL and manifest format specification, version 3
 
 Status: implemented by `wal/`; required by RFC-0001 §6.3 before durable
 implementation acceptance. This document pins the on-disk format, both
@@ -38,22 +38,26 @@ offset 4096                  record region, segmented
 
 Records never cross segment boundaries: a record that does not fit in the
 remaining segment space is written at the next segment start; the gap is
-zero padding. `SegmentSize` default 1 MiB; `MaxBatchBytes` default 8 MiB
-(a record must fit both).
+zero padding. `SegmentSize` default 8 MiB; `MaxBatchBytes` default 8 MiB
+(a record must fit both). `SegmentSize` is always raised to at least
+`MaxBatchBytes` so any admitted batch fits a segment, and it is **persisted in
+the superblock** (§2.1): recovery scans with the exact grid the store was
+written with, never the caller's current option.
 
 ### 2.1 Superblock (4096 bytes)
 
 | Offset | Size | Field |
 | --- | --- | --- |
 | 0 | 4 | magic `RWAL` (0x5257414c) |
-| 4 | 4 | format version (2; version 1 readable, upgraded on open) |
+| 4 | 4 | format version (3; older versions rejected, see §7) |
 | 8 | 8 | cluster identity |
 | 16 | 8 | member identity |
 | 24 | 8 | storage generation |
 | 32 | 4 | initial configuration length |
-| 36 | n | initial configuration (`raft.EncodeConfig`) |
+| 36 | n | initial configuration (`raft.EncodeConfig`); n ≤ 988 |
 | 512 | 28 | checkpoint slot A |
 | 768 | 28 | checkpoint slot B |
+| 1024 | 8 | `SegmentSize` (persisted segment grid; authoritative on recovery) |
 
 All integers big-endian. The remaining bytes are reserved (zero).
 
@@ -141,9 +145,11 @@ recognized by the recovery rule below.
 
 ## 4. Recovery
 
-1. Read superblock; validate magic, version (1 or 2), cluster/member identity,
-   and storage generation (regression rejected, §9). A fresh (all-zero) device
-   is initialized only when the caller explicitly allows creation.
+1. Read superblock; validate magic, version (3), cluster/member identity,
+   and storage generation (regression rejected, §9). Read the persisted
+   `SegmentSize` and use it as the scan grid (the caller's option does not
+   override it). A fresh (all-zero) device is initialized only when the caller
+   explicitly allows creation.
 2. Select the checkpoint (dual slots). Scan from the checkpoint:
    - zero magic → skip to next segment boundary;
    - bad magic / CRC mismatch / torn record → disposable **only** if no live
@@ -158,8 +164,9 @@ recognized by the recovery rule below.
    Dispose the torn tail via `Truncate` (logical on raw block) + `Sync`.
 4. Commit metadata must never reference entries missing from the recoverable
    log/snapshot; violation → intervention.
-5. Version-1 superblocks are rewritten as version 2 after successful recovery
-   (the upgrade is crash-safe: a crash before the rewrite re-runs v1 recovery).
+5. The persisted `SegmentSize` governs the scan grid for the store's lifetime;
+   a caller option larger than the persisted grid is ignored for recovery (the
+   grid is fixed at creation).
 
 Ambiguous corruption in a committed prefix, a missing referenced chunk, or an
 unsupported version stops recovery; the library never silently truncates
@@ -188,9 +195,14 @@ reclamation (§8). An actual failed write/sync (including ENOSPC) is terminal
 
 ## 7. Upgrade mechanism
 
-Format changes bump the superblock version. Readers accept the previous
-version and upgrade in place after successful recovery (§4 step 5). Record
-payload additions are trailer-appenditive with presence flags so older
-payloads decode unchanged. Incompatible changes (layout, checksum scope)
-require a new version and an explicit migration; silent reinterpretation is
-forbidden.
+Format changes bump the superblock version. Record payload additions are
+trailer-appenditive with presence flags so older payloads decode unchanged.
+Incompatible changes (layout, checksum scope, the segment grid) require a new
+version and an explicit migration; silent reinterpretation is forbidden.
+
+Version 3 persists `SegmentSize` (§2.1). Versions 1 and 2 did not persist the
+segment grid, so reopening such a store with a different `SegmentSize` could
+skip live records; version-3 readers therefore **reject** versions 1 and 2 with
+an explicit `unsupported version (format upgrade required)` error rather than
+reinterpret them. Migrating a pre-v3 store requires an explicit offline tool
+that rewrites it with a persisted grid; no in-place upgrade is performed.

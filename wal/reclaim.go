@@ -142,6 +142,23 @@ func (w *WAL) spaceCheck(off int64, recSize int) error {
 // (§6.4). Chunks are durable before the manifest references them; interrupted
 // staging leaves orphan chunks that recovery ignores. Caller holds w.mu.
 func (w *WAL) writeSnapChunks(index raft.Index, data []byte) (int64, error) {
+	// Align the publication start to a segment boundary. The recovery
+	// checkpoint is segment-aligned; if a publication began mid-segment, the
+	// next publication's checkpoint could round down into this one and replay
+	// its manifest while excluding its chunks (which lie in an earlier
+	// segment), stranding a superseded manifest as ErrCorrupt. Starting on a
+	// boundary guarantees the next checkpoint excludes this publication whole
+	// (manifest included). The zero gap is skipped by recovery (§6.4).
+	if rel := (w.writeOff - superSize) % w.opts.SegmentSize; rel != 0 {
+		pad := w.opts.SegmentSize - rel
+		if err := w.spaceCheck(w.writeOff, int(pad)); err != nil {
+			return 0, err
+		}
+		if _, err := w.dev.WriteAt(make([]byte, pad), w.writeOff); err != nil {
+			return 0, err
+		}
+		w.writeOff += pad
+	}
 	start := w.writeOff
 	lim := w.opts.MaxBatchBytes
 	if int64(lim) > w.opts.SegmentSize {

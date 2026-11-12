@@ -335,36 +335,57 @@ func TestDiskFullTerminal(t *testing.T) {
 	}
 }
 
-// TestV1Upgrade: a version-1 superblock is recovered and upgraded in place
-// (§6.3 on-disk upgrade mechanism).
-func TestV1Upgrade(t *testing.T) {
+// TestUnsupportedVersionRejected: a store written with an older format version
+// is rejected with an explicit upgrade error, never silently reinterpreted
+// (spec §7). Earlier versions did not persist SegmentSize, so reopening them
+// with a different grid could skip live records; rejection is the safe path.
+func TestUnsupportedVersionRejected(t *testing.T) {
+	for _, old := range []byte{1, 2} {
+		dev := NewMemDevice()
+		opts := testOpts()
+		w, err := Open(dev, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		seedEntries(t, w, 20)
+		w.Close()
+		dev.data[4], dev.data[5], dev.data[6], dev.data[7] = 0, 0, 0, old
+		dev.Sync()
+		if _, err := Open(dev, opts); !errors.Is(err, ErrCorrupt) {
+			t.Fatalf("version %d: expected ErrCorrupt rejection, got %v", old, err)
+		}
+	}
+}
+
+// TestSegmentGridPersisted: the segment grid is persisted at creation and
+// honored on reopen even if the caller passes a different SegmentSize. Writing
+// with a small grid and reopening with a larger option must not skip live
+// records (the B3 silent-data-loss regression).
+func TestSegmentGridPersisted(t *testing.T) {
 	dev := NewMemDevice()
-	opts := testOpts()
-	w, err := Open(dev, opts)
+	small := testOpts()
+	small.SegmentSize = 64 << 10
+	small.MaxBatchBytes = 32 << 10
+	w, err := Open(dev, small)
 	if err != nil {
 		t.Fatal(err)
 	}
-	seedEntries(t, w, 20)
+	seedEntries(t, w, 500)
 	w.Close()
-	// Regress the version field to v1 (layout is otherwise compatible for
-	// entry-only logs).
-	dev.data[4] = 0
-	dev.data[5] = 0
-	dev.data[6] = 0
-	dev.data[7] = 1
-	dev.Sync()
-	w2, err := Open(dev, opts)
+	// Reopen with a much larger SegmentSize option: recovery must use the
+	// persisted 64 KiB grid, not the 8 MiB option.
+	big := testOpts()
+	big.SegmentSize = 8 << 20
+	big.MaxBatchBytes = 8 << 20
+	w2, err := Open(dev, big)
 	if err != nil {
-		t.Fatalf("v1 recovery: %v", err)
+		t.Fatalf("reopen with larger grid: %v", err)
 	}
 	st, _ := w2.Load()
-	if len(st.Entries) != 20 {
-		t.Fatalf("v1 entries lost: %d", len(st.Entries))
+	if len(st.Entries) != 500 {
+		t.Fatalf("entries lost on reopen with different grid: %d, want 500", len(st.Entries))
 	}
 	w2.Close()
-	if v := uint32(dev.data[4])<<24 | uint32(dev.data[5])<<16 | uint32(dev.data[6])<<8 | uint32(dev.data[7]); v != formatVersion {
-		t.Fatalf("not upgraded: version %d", v)
-	}
 }
 
 // TestCheckpointSlotTorn: a torn newest slot falls back to the previous valid
