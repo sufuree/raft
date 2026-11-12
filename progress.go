@@ -31,17 +31,6 @@ type Progress struct {
 // quorumIndex computes the highest index replicated by a majority of every
 // voter set. Self is counted only when selfDurable >= candidate (§6.2).
 func quorumIndex(sets []NodeSet, match map[NodeID]Index, self NodeID, selfMatch Index) Index {
-	// Collect candidate indexes from all voters.
-	var all []Index
-	for _, set := range sets {
-		for _, id := range set {
-			if id == self {
-				all = append(all, selfMatch)
-			} else {
-				all = append(all, match[id])
-			}
-		}
-	}
 	// The quorum index is the largest N such that every voter set has a
 	// majority with match >= N. Compute per-set and take the min.
 	var result Index
@@ -63,7 +52,6 @@ func quorumIndex(sets []NodeSet, match map[NodeID]Index, self NodeID, selfMatch 
 			first = false
 		}
 	}
-	_ = all
 	return result
 }
 

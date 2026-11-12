@@ -74,9 +74,11 @@ type Config struct {
 
 	// OnStore, when set, observes each ordered storage operation's wall
 	// duration (§8 metrics): op "save" covers write+sync of one persistence
-	// batch; op "applied" covers the applied-watermark update. It runs on the
-	// storage goroutine, never on the event loop, and must not block. It is
-	// observability only: protocol decisions never depend on it (§5).
+	// batch; op "applied" covers the applied-watermark update. It runs
+	// synchronously on the storage goroutine, never on the event loop, so a slow
+	// observer delays the durability receipt of subsequent batches — keep it
+	// non-blocking. It is observability only: protocol decisions never depend on
+	// it (§5).
 	OnStore func(op string, d time.Duration)
 	// OnApply, when set, observes each FSM apply batch with the dispatch →
 	// FSM-completion duration (§8, §11 apply-latency reporting). It runs on an
@@ -658,7 +660,8 @@ func (d *Driver) Read(ctx context.Context) (raft.Index, error) {
 		d.mu.Unlock()
 		return 0, ErrOverload
 	}
-	id := fmt.Sprintf("r-%d-%d", d.cfg.ID, atomic.AddUint64(&d.nextID, 1))
+	d.nextID++
+	id := fmt.Sprintf("r-%d-%d", d.cfg.ID, d.nextID)
 	ch := make(chan raft.ReadResult, 1)
 	d.readWait[id] = ch
 	d.mu.Unlock()

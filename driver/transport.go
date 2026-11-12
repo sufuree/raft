@@ -11,8 +11,10 @@ import (
 type LoopNetwork struct {
 	mu    sync.Mutex
 	nodes map[raft.NodeID]*LoopTransport
-	// Drop, when set, drops messages for which it returns true (partitions).
-	Drop func(from, to raft.NodeID) bool
+	// drop, when set, drops messages for which it returns true (partitions).
+	// Unexported: mutate only via SetDrop, which holds mu (Send reads it under
+	// the same lock); direct assignment would race.
+	drop func(from, to raft.NodeID) bool
 }
 
 // NewLoopNetwork creates an empty loopback network.
@@ -21,12 +23,12 @@ func NewLoopNetwork() *LoopNetwork {
 }
 
 // SetDrop installs the partition predicate under the network lock so it can
-// be changed while transports are sending (Send reads Drop under the same
+// be changed while transports are sending (Send reads drop under the same
 // lock). A nil predicate heals all partitions.
 func (n *LoopNetwork) SetDrop(f func(from, to raft.NodeID) bool) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	n.Drop = f
+	n.drop = f
 }
 
 // NewTransport registers a transport for a node.
@@ -51,7 +53,7 @@ type LoopTransport struct {
 func (t *LoopTransport) Send(m raft.Message) error {
 	t.net.mu.Lock()
 	dst := t.net.nodes[m.To]
-	drop := t.net.Drop
+	drop := t.net.drop
 	t.net.mu.Unlock()
 	if dst == nil {
 		return nil
