@@ -63,8 +63,12 @@ cat > full.json <<'JSON'
 JSON
 mkjson crashwrite.json crashwrite
 mkjson crashverify.json crashverify
-mkjson bench.json bench
 mkjson idle.json idle
+# The benchmark profiles need the large volume (archive-class logs + 64 MiB
+# snapshot), not the 128 MiB qualvol.
+cat > bench.json <<'JSON'
+{"Files":["qualify"],"Args":["qualify"],"Env":{"QUAL_MODE":"bench"},"Mounts":{"benchvol":"/data"},"RunConfig":{"Memory":"512M","CPUs":1}}
+JSON
 cat > bboltprobe.json <<'JSON'
 {"Files":["bboltprobe"],"Args":["bboltprobe"],"Mounts":{"qualvol":"/data"},"RunConfig":{"Memory":"512M","CPUs":1}}
 JSON
