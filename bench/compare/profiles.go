@@ -198,6 +198,14 @@ func runCatchup(cl cluster, leader node) profileRun {
 	if err := cl.snapshot(); err != nil {
 		panic(fmt.Sprintf("P6 snapshot: %v", err))
 	}
+	// A large snapshot publication can occupy the single vCPU long enough for
+	// CheckQuorum to step the leader down; re-acquire the current leader so the
+	// suffix and integrity comparison track the actual authority (a safe
+	// leadership transfer, not a fault).
+	leader, err := cl.leader()
+	if err != nil {
+		panic(fmt.Sprintf("P6 re-leader: %v", err))
+	}
 	suffix := sequential(leader, make([]byte, 1024), 0, 0, 100)
 	if err := leader.barrier(); err != nil {
 		panic(err)
@@ -206,12 +214,8 @@ func runCatchup(cl cluster, leader node) profileRun {
 	pr.errs = post.errs + suffix.errs
 	pr.lats = append(pr.lats, post.lats...)
 	pr.lats = append(pr.lats, suffix.lats...)
-	target := cl.applied(1)
-	// Compare buffer contents, not the applied-bound checksum: the leader's
-	// applied may advance past target via new-leader no-ops (which do not stamp
-	// application state), so the follower at target and the leader at target+k
-	// still hold identical state (same integrity basis as P7).
-	want := cl.stateCRC(1)
+	lid := cl.leaderID()
+	target := cl.applied(lid)
 	cl.unstall(stallID)
 	t0 := time.Now()
 	if err := cl.restart(stallID); err != nil {
@@ -225,10 +229,13 @@ func runCatchup(cl cluster, leader node) profileRun {
 		panic("P6: follower did not catch up via snapshot")
 	}
 	pr.extra["catchup_sec"] = time.Since(t0).Seconds()
-	if cl.stateCRC(stallID) == want {
+	// Compare buffer contents against the current leader (both quiesced): the
+	// applied index may differ by new-leader no-ops, which do not stamp state.
+	lid = cl.leaderID()
+	if cl.stateCRC(stallID) == cl.stateCRC(lid) {
 		pr.extra["integrity"] = 1
 	} else {
-		panic(fmt.Sprintf("P6: follower state CRC mismatch after snapshot install (target=%d): leader{%s} follower{%s}", target, cl.diagnose(1), cl.diagnose(stallID)))
+		panic(fmt.Sprintf("P6: follower state CRC mismatch after snapshot install (target=%d): leader{%s} follower{%s}", target, cl.diagnose(lid), cl.diagnose(stallID)))
 	}
 	return pr
 }

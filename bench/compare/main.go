@@ -81,6 +81,7 @@ type cluster interface {
 	checksum(id int) uint64
 	stateCRC(id int) uint32
 	diagnose(id int) string
+	leaderID() int
 	snapshot() error
 	shutdown()
 }

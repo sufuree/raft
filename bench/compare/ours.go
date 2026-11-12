@@ -175,6 +175,14 @@ func (c *oursCluster) restart(id int) error {
 func (c *oursCluster) applied(id int) uint64  { return c.nodes[id-1].fsm.f.appliedIndex() }
 func (c *oursCluster) checksum(id int) uint64 { return c.nodes[id-1].fsm.f.checksum() }
 func (c *oursCluster) stateCRC(id int) uint32 { return c.nodes[id-1].fsm.f.bufferCRC() }
+func (c *oursCluster) leaderID() int {
+	for _, n := range c.nodes {
+		if n.d.IsLeader() {
+			return int(n.id)
+		}
+	}
+	return 0
+}
 func (c *oursCluster) diagnose(id int) string {
 	n := c.nodes[id-1]
 	du, co, pe, di, ap := n.d.Watermarks()

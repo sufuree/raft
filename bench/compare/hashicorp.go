@@ -202,9 +202,17 @@ func (c *hcCluster) restart(id int) error {
 func (c *hcCluster) applied(id int) uint64  { return c.nodes[id-1].fsm.f.appliedIndex() }
 func (c *hcCluster) checksum(id int) uint64 { return c.nodes[id-1].fsm.f.checksum() }
 func (c *hcCluster) stateCRC(id int) uint32 { return c.nodes[id-1].fsm.f.bufferCRC() }
+func (c *hcCluster) leaderID() int {
+	for i, n := range c.nodes {
+		if n.r.State() == hraft.Leader {
+			return i + 1
+		}
+	}
+	return 0
+}
 func (c *hcCluster) diagnose(id int) string {
 	n := c.nodes[id-1]
-	return fmt.Sprintf("n%d state=%v term=%d leader=%s applied=%d", id, n.r.State(), n.r.Stats()["term"], n.r.Stats()["last_leader"], n.fsm.f.appliedIndex())
+	return fmt.Sprintf("n%d state=%v term=%s leader=%s applied=%d", id, n.r.State(), n.r.Stats()["term"], n.r.Stats()["last_leader"], n.fsm.f.appliedIndex())
 }
 
 func (c *hcCluster) snapshot() error {
