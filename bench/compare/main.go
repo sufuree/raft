@@ -80,6 +80,7 @@ type cluster interface {
 	applied(id int) uint64
 	checksum(id int) uint64
 	stateCRC(id int) uint32
+	diagnose(id int) string
 	snapshot() error
 	shutdown()
 }
@@ -212,6 +213,7 @@ func runCell(impl, profile string, voters int, dir string, opts cellOpts) (r res
 			r.IntegrityOK = v == 1
 		}
 	}
+	runtime.GC() // settle live heap before reporting library overhead
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
 	r.HeapMB = float64(ms.HeapAlloc) / (1 << 20)

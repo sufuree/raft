@@ -180,7 +180,7 @@ func runLagging(cl cluster, leader node, opts cellOpts) profileRun {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if cl.applied(stallID) < target {
-		panic(fmt.Sprintf("P5: follower did not catch up after unstall: leader applied=%d follower applied=%d (target=%d)", cl.applied(1), cl.applied(stallID), target))
+		panic(fmt.Sprintf("P5: follower did not catch up after unstall (target=%d): leader{%s} follower{%s}", target, cl.diagnose(1), cl.diagnose(stallID)))
 	}
 	pr.extra["recover_sec"] = time.Since(t0).Seconds()
 	return pr
@@ -228,7 +228,7 @@ func runCatchup(cl cluster, leader node) profileRun {
 	if cl.stateCRC(stallID) == want {
 		pr.extra["integrity"] = 1
 	} else {
-		panic("P6: follower state checksum mismatch after snapshot install")
+		panic(fmt.Sprintf("P6: follower state CRC mismatch after snapshot install (target=%d): leader{%s} follower{%s}", target, cl.diagnose(1), cl.diagnose(stallID)))
 	}
 	return pr
 }

@@ -175,6 +175,12 @@ func (c *oursCluster) restart(id int) error {
 func (c *oursCluster) applied(id int) uint64  { return c.nodes[id-1].fsm.f.appliedIndex() }
 func (c *oursCluster) checksum(id int) uint64 { return c.nodes[id-1].fsm.f.checksum() }
 func (c *oursCluster) stateCRC(id int) uint32 { return c.nodes[id-1].fsm.f.bufferCRC() }
+func (c *oursCluster) diagnose(id int) string {
+	n := c.nodes[id-1]
+	du, co, pe, di, ap := n.d.Watermarks()
+	return fmt.Sprintf("n%d role=%v term=%d leader=%d wm[%d,%d,%d,%d,%d] fail=%q",
+		id, n.d.Role(), n.d.Term(), n.d.Leader(), du, co, pe, di, ap, n.d.FailReason())
+}
 
 // snapshot triggers a leader snapshot and waits until the WAL has published
 // it (the authoritative publication, §6.4 — not merely the request).

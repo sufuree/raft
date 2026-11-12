@@ -322,6 +322,11 @@ func (c *etcdCluster) applied(id int) uint64 {
 }
 func (c *etcdCluster) checksum(id int) uint64 { return c.nodes[id-1].fsm.checksum() }
 func (c *etcdCluster) stateCRC(id int) uint32 { return c.nodes[id-1].fsm.bufferCRC() }
+func (c *etcdCluster) diagnose(id int) string {
+	n := c.nodes[id-1]
+	st := n.n.Status()
+	return fmt.Sprintf("n%d state=%v term=%d leader=%d applied=%d", id, st.RaftState, st.Term, st.Lead, n.fsm.appliedIndex())
+}
 
 func (c *etcdCluster) snapshot() error {
 	n, err := c.leader()
