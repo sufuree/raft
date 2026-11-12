@@ -112,3 +112,41 @@ func TestNilObserversUnchanged(t *testing.T) {
 		t.Fatalf("applied watermark %d < 2", ap)
 	}
 }
+
+// TestLoopNetworkSetDrop: the partition predicate can be installed and healed
+// while transports are sending (SetDrop and Send share the network lock).
+func TestLoopNetworkSetDrop(t *testing.T) {
+	net := NewLoopNetwork()
+	a := net.NewTransport(1)
+	b := net.NewTransport(2)
+	defer a.Close()
+	defer b.Close()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 200; i++ {
+			net.SetDrop(func(from, to raft.NodeID) bool { return i%2 == 0 })
+			net.SetDrop(nil)
+		}
+	}()
+	for i := 0; i < 200; i++ {
+		if err := a.Send(raft.Message{From: 1, To: 2}); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-b.Messages():
+		default:
+		}
+	}
+	<-done
+	net.SetDrop(func(from, to raft.NodeID) bool { return true })
+	if err := a.Send(raft.Message{From: 1, To: 2}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case m := <-b.Messages():
+		t.Fatalf("partitioned message delivered: %v", m)
+	default:
+	}
+	net.SetDrop(nil)
+}

@@ -20,6 +20,15 @@ func NewLoopNetwork() *LoopNetwork {
 	return &LoopNetwork{nodes: make(map[raft.NodeID]*LoopTransport)}
 }
 
+// SetDrop installs the partition predicate under the network lock so it can
+// be changed while transports are sending (Send reads Drop under the same
+// lock). A nil predicate heals all partitions.
+func (n *LoopNetwork) SetDrop(f func(from, to raft.NodeID) bool) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.Drop = f
+}
+
 // NewTransport registers a transport for a node.
 func (n *LoopNetwork) NewTransport(id raft.NodeID) *LoopTransport {
 	n.mu.Lock()
